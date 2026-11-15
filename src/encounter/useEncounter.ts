@@ -1,5 +1,7 @@
 import { useCallback, useMemo, useRef, useState } from 'react';
 import { placeGroup, startPoint } from '../core/encounter/placement';
+import { rollInitiative, sortInitiative, type InitiativeEntry } from '../core/encounter/initiative';
+import { createRng, randomSeed } from '../core/rng';
 import type { DungeonMap, GridPolicy, Point, RoomObject, Token } from '../core/model/types';
 import { rectCenter } from '../core/model/grid';
 import { buildMoveGrid, describeAssumptions, footprintSquares } from '../core/rules/dnd2024';
@@ -21,21 +23,21 @@ export function newTokenId(): string {
 function demoTokens(map: DungeonMap): Token[] {
   const base = { mapId: map.id, position: { x: 0, y: 0 }, senses: {}, conditions: [], visibility: 'public' as const };
   const party: Token[] = [
-    { ...base, id: newTokenId(), label: 'Brannoc', color: '#0072b2', size: 'medium', speeds: { walk: 30 }, side: 'party' },
-    { ...base, id: newTokenId(), label: 'Ilsa Vane', color: '#e69f00', size: 'medium', speeds: { walk: 30 }, side: 'party' },
-    { ...base, id: newTokenId(), label: 'Tamsin', color: '#009e73', size: 'small', speeds: { walk: 30 }, side: 'party' },
-    { ...base, id: newTokenId(), label: 'Old Grimm', color: '#cc79a7', size: 'medium', speeds: { walk: 30 }, side: 'party' },
+    { ...base, id: newTokenId(), label: 'Brannoc', color: '#0072b2', size: 'medium', speeds: { walk: 30 }, side: 'party', initiativeBonus: 1 },
+    { ...base, id: newTokenId(), label: 'Ilsa Vane', color: '#e69f00', size: 'medium', speeds: { walk: 30 }, side: 'party', initiativeBonus: 2 },
+    { ...base, id: newTokenId(), label: 'Tamsin', color: '#009e73', size: 'small', speeds: { walk: 30 }, side: 'party', initiativeBonus: 3 },
+    { ...base, id: newTokenId(), label: 'Old Grimm', color: '#cc79a7', size: 'medium', speeds: { walk: 30 }, side: 'party', initiativeBonus: 0 },
   ];
   const foes: Token[] = [
-    { ...base, id: newTokenId(), label: 'Ogre', color: '#d55e00', size: 'large', speeds: { walk: 40 }, side: 'enemy' },
-    { ...base, id: newTokenId(), label: 'Goblin Boss', color: '#56b4e9', size: 'small', speeds: { walk: 30 }, side: 'enemy' },
+    { ...base, id: newTokenId(), label: 'Ogre', color: '#d55e00', size: 'large', speeds: { walk: 40 }, side: 'enemy', initiativeBonus: -1, behavior: 'guard', leash: 6 },
+    { ...base, id: newTokenId(), label: 'Goblin Boss', color: '#56b4e9', size: 'small', speeds: { walk: 30 }, side: 'enemy', initiativeBonus: 2, behavior: 'guard', leash: 6 },
   ];
   const placedParty = placeGroup(map, party, startPoint(map));
   // Foes wait in the room farthest from the entrance.
   const exit = map.objects.find((o) => o.kind === 'stairs' && o.role === 'exit');
   const rooms = map.objects.filter((o): o is RoomObject => o.kind === 'room');
   const lair = exit && exit.kind === 'stairs' ? exit.at : rooms.length ? rectCenter(rooms[rooms.length - 1].rect) : startPoint(map);
-  const placedFoes = placeGroup(map, foes, lair, placedParty);
+  const placedFoes = placeGroup(map, foes, lair, placedParty).map((t) => ({ ...t, home: t.position }));
   return [...placedParty, ...placedFoes];
 }
 
@@ -51,7 +53,20 @@ export interface Encounter {
   moveTo: (target: Point, override: boolean) => string | null;
   undo: () => void;
   canUndo: boolean;
-  newRound: () => void;
+  round: number;
+  /** Initiative order while in combat, else null. */
+  combat: { order: InitiativeEntry[]; turn: number } | null;
+  activeId: string | null;
+  /** Exploration: next round (everyone's movement resets). */
+  nextRound: () => void;
+  startCombat: (participants: Token[]) => void;
+  /** Combat: next creature's turn. Returns true when that wrapped into a new round. */
+  endTurn: () => boolean;
+  endCombat: () => void;
+  joinCombat: (t: Token) => void;
+  setInitiative: (tokenId: string, total: number) => void;
+  /** Replace positions in bulk (e.g. unseen monsters wandering). */
+  setPositions: (moved: Token[]) => void;
   updateToken: (id: string, patch: Partial<Token>) => void;
   addToken: () => void;
   removeToken: (id: string) => void;
@@ -86,7 +101,7 @@ export function useEncounter(map: DungeonMap, requestDraw: () => void, opts: Enc
       state.tokens.filter((t) => t.side !== 'party'),
       exit && exit.kind === 'stairs' ? exit.at : startPoint(map),
       relocated,
-    );
+    ).map((t) => (t.behavior === 'guard' ? { ...t, home: t.position } : t));
     setState({ mapId: map.id, tokens: [...relocated, ...others] });
   }
   const tokens = state.tokens;
@@ -94,6 +109,8 @@ export function useEncounter(map: DungeonMap, requestDraw: () => void, opts: Enc
   const [spent, setSpent] = useState<Record<string, number>>({});
   const [history, setHistory] = useState<MoveRecord[]>([]);
   const [busy, setBusy] = useState(false);
+  const [round, setRound] = useState(1);
+  const [combat, setCombat] = useState<{ order: InitiativeEntry[]; turn: number } | null>(null);
   const animating = useRef<{ id: string; pos: Point } | null>(null);
   const policy = opts.policy;
 
@@ -175,9 +192,65 @@ export function useEncounter(map: DungeonMap, requestDraw: () => void, opts: Enc
     setHistory((h) => h.slice(0, -1));
   };
 
-  const newRound = () => {
+  const nextRound = () => {
     setSpent({});
     setHistory([]);
+    setRound((r) => r + 1);
+  };
+
+  const beginTurn = (tokenId: string) => {
+    setSpent((sp) => ({ ...sp, [tokenId]: 0 }));
+    setSelectedId(tokenId);
+  };
+
+  const startCombat = (participants: Token[]) => {
+    if (participants.length === 0) return;
+    const order = rollInitiative(participants, createRng(randomSeed()));
+    setCombat({ order, turn: 0 });
+    setRound(1);
+    setHistory([]);
+    beginTurn(order[0].tokenId);
+  };
+
+  const endTurn = (): boolean => {
+    if (!combat || busy) return false;
+    const next = combat.turn + 1;
+    const wrapped = next >= combat.order.length;
+    const turn = wrapped ? 0 : next;
+    setCombat({ ...combat, turn });
+    if (wrapped) {
+      setRound((r) => r + 1);
+      setHistory([]);
+    }
+    beginTurn(combat.order[turn].tokenId);
+    return wrapped;
+  };
+
+  const endCombat = () => {
+    setCombat(null);
+    setSpent({});
+    setHistory([]);
+    setRound((r) => r + 1);
+  };
+
+  const joinCombat = (t: Token) => {
+    if (!combat || combat.order.some((e) => e.tokenId === t.id)) return;
+    const [entry] = rollInitiative([t], createRng(randomSeed()));
+    const activeId = combat.order[combat.turn].tokenId;
+    const order = sortInitiative([...combat.order, entry]);
+    setCombat({ order, turn: order.findIndex((e) => e.tokenId === activeId) });
+  };
+
+  const setInitiative = (tokenId: string, total: number) => {
+    if (!combat) return;
+    const activeId = combat.order[combat.turn].tokenId;
+    const order = sortInitiative(combat.order.map((e) => (e.tokenId === tokenId ? { ...e, total } : e)));
+    setCombat({ order, turn: order.findIndex((e) => e.tokenId === activeId) });
+  };
+
+  const setPositions = (moved: Token[]) => {
+    const byId = new Map(moved.map((t) => [t.id, t.position]));
+    setTokens((ts) => ts.map((t) => (byId.has(t.id) ? { ...t, position: byId.get(t.id)! } : t)));
   };
 
   const updateToken = (id: string, patch: Partial<Token>) => setTokens((ts) => ts.map((t) => (t.id === id ? { ...t, ...patch } : t)));
@@ -206,6 +279,15 @@ export function useEncounter(map: DungeonMap, requestDraw: () => void, opts: Enc
 
   const removeToken = (id: string) => {
     setTokens((ts) => ts.filter((t) => t.id !== id));
+    if (combat) {
+      const activeId = combat.order[combat.turn].tokenId;
+      const order = combat.order.filter((e) => e.tokenId !== id);
+      if (order.length === 0) setCombat(null);
+      else {
+        const keep = order.findIndex((e) => e.tokenId === activeId);
+        setCombat({ order, turn: keep >= 0 ? keep : Math.min(combat.turn, order.length - 1) });
+      }
+    }
     setHistory((h) => h.filter((m) => m.tokenId !== id));
     if (selectedId === id) setSelectedId(null);
   };
@@ -220,7 +302,16 @@ export function useEncounter(map: DungeonMap, requestDraw: () => void, opts: Enc
     moveTo,
     undo,
     canUndo: history.length > 0 && !busy,
-    newRound,
+    round,
+    combat,
+    activeId: combat ? combat.order[combat.turn]?.tokenId ?? null : null,
+    nextRound,
+    startCombat,
+    endTurn,
+    endCombat,
+    joinCombat,
+    setInitiative,
+    setPositions,
     updateToken,
     addToken,
     addTokens,

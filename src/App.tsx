@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { rollEncounter } from './core/encounter/random';
+import { wanderAll } from './core/encounter/wander';
 import { generateDungeon, type Theme } from './core/generator/generate';
 import { idx } from './core/model/grid';
 import type { DoorState, DungeonMap, GridPolicy, Point, Token } from './core/model/types';
@@ -7,6 +8,7 @@ import { footprintSquares } from './core/rules/dnd2024';
 import { createRng, randomSeed } from './core/rng';
 import { computeVisible, FOG_EXPLORED, FOG_HIDDEN, FOG_VISIBLE, updateFog } from './core/visibility/fog';
 import { TokenPanel } from './encounter/TokenPanel';
+import { TurnPanel } from './encounter/TurnPanel';
 import { newTokenId, useEncounter } from './encounter/useEncounter';
 import { drawFog } from './renderer/fogLayer';
 import { MapView, type MapViewController } from './renderer/MapView';
@@ -62,6 +64,7 @@ export default function App() {
   const [sightFt, setSightFt] = useState(60);
   const [autoDoors, setAutoDoors] = useState(true);
   const [encounterChance, setEncounterChance] = useState(0);
+  const [wandering, setWandering] = useState(true);
 
   // The generated map, plus live edits (door states) layered on top.
   const generated = useMemo(() => generateDungeon(seed, { theme }), [seed, theme]);
@@ -127,10 +130,40 @@ export default function App() {
     });
   };
 
-  const newRound = () => {
-    enc.newRound();
-    if (encounterChance > 0 && Math.random() < encounterChance) rollNow('New round. ');
-    else setMessage({ text: 'New round: everyone’s movement is reset.' });
+  /** Between rounds: unseen monsters wander, then maybe a random encounter. */
+  const afterRound = (label: string) => {
+    let note = label;
+    if (wandering) {
+      const res = wanderAll(map, enc.tokens, visible, createRng(randomSeed()));
+      if (res.moved.length) {
+        enc.setPositions(res.moved);
+        note += ` ${res.moved.length} unseen creature${res.moved.length > 1 ? 's' : ''} moved in the dark (${res.moved.map((t) => t.label).join(', ')}).`;
+      }
+    }
+    if (encounterChance > 0 && Math.random() < encounterChance) {
+      rollNow(note + ' ');
+      return;
+    }
+    setMessage({ text: note, dmOnly: note !== label });
+  };
+
+  const nextRound = () => {
+    if (enc.combat) return;
+    enc.nextRound();
+    afterRound(`Round ${enc.round + 1}: everyone's movement is reset.`);
+  };
+
+  const startCombat = () => {
+    const participants = enc.tokens.filter((t) => t.mapId === map.id && (t.side === 'party' || !fogOn || footprint(t, t.position).some((c) => visible[idx(map, c.x, c.y)])));
+    enc.startCombat(participants);
+    setMessage({ text: `Combat! Initiative rolled for ${participants.length} creatures.` });
+  };
+
+  const endTurn = () => {
+    if (!enc.combat) return;
+    const wrapped = enc.endTurn();
+    if (wrapped) afterRound(`Round ${enc.round + 1} begins.`);
+    else setMessage(null);
   };
 
   // ---- Movement preview ---------------------------------------------------
@@ -194,6 +227,11 @@ export default function App() {
   };
 
   const onKey = (e: React.KeyboardEvent): boolean => {
+    if (e.key === 'n' || e.key === 'N') {
+      if (enc.combat) endTurn();
+      else nextRound();
+      return true;
+    }
     if (e.key === 'Escape' && enc.selected) {
       enc.select(null);
       return true;
@@ -225,9 +263,11 @@ export default function App() {
       : hoverPath.reasons.join(' ')
     : null;
   const shownMessage = message && !(message.dmOnly && playerView) ? message.text : null;
+  const activeToken = enc.activeId ? enc.tokens.find((t) => t.id === enc.activeId) : null;
+  const turnPrefix = activeToken ? `${activeToken.label}'s turn · ` : '';
   const hint = enc.selected
-    ? `${enc.selected.label} selected · ${enc.remaining(enc.selected)} ft left · click a square to move, O to open/close an adjacent door, Esc to deselect`
-    : `${rooms} rooms · click a token to select it · click a door to open or close it (Shift-click to lock)`;
+    ? `${turnPrefix}${enc.selected.label} selected · ${enc.remaining(enc.selected)} ft left · click a square to move, O to open/close an adjacent door, Esc to deselect`
+    : `${turnPrefix}${rooms} rooms · N for ${enc.combat ? 'next turn' : 'next round'} · click a token to select it · click a door to open or close it (Shift-click to lock)`;
 
   return (
     <div className="app">
@@ -279,7 +319,14 @@ export default function App() {
           onKey={onKey}
           controllerRef={controller}
         />
-        <TokenPanel enc={enc} onNewRound={newRound} hideFromPlayers={playerView ? (t) => !playersSee(t) : undefined}>
+        <TokenPanel enc={enc} hideFromPlayers={playerView ? (t) => !playersSee(t) : undefined}>
+          <TurnPanel
+            enc={enc}
+            onNextRound={nextRound}
+            onStartCombat={startCombat}
+            onEndTurn={endTurn}
+            hidden={playerView ? (t) => !playersSee(t) : undefined}
+          />
           <section className="play-controls" aria-label="Play settings">
             <h2>Play</h2>
             <label>
@@ -303,6 +350,9 @@ export default function App() {
                 Re-shroud
               </button>
             </div>
+            <label className="check">
+              <input type="checkbox" checked={wandering} onChange={(e) => setWandering(e.target.checked)} /> Unseen monsters wander between rounds
+            </label>
             <h3>Random encounters</h3>
             <label>
               Check each new round

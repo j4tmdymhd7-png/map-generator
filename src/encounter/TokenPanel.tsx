@@ -1,5 +1,6 @@
 import { useRef, useState } from 'react';
-import { SIZES, type Side, type Size, type Token } from '../core/model/types';
+import { SIZES, type Behavior, type Side, type Size, type Token } from '../core/model/types';
+import { behaviorOf } from '../core/encounter/wander';
 import { initials, portraitFromFile } from '../renderer/avatars';
 import type { Encounter } from './useEncounter';
 
@@ -15,14 +16,14 @@ function Avatar({ t }: { t: Token }) {
   );
 }
 
+const BEHAVIOR_LABEL: Record<Behavior, string> = { wander: 'Wanders', guard: 'Guards an area', still: 'Stays put' };
+
 export function TokenPanel({
   enc,
-  onNewRound,
   hideFromPlayers,
   children,
 }: {
   enc: Encounter;
-  onNewRound: () => void;
   /** In player view: tokens the players can't currently see are left out of the list. */
   hideFromPlayers?: (t: Token) => boolean;
   children?: React.ReactNode;
@@ -58,9 +59,6 @@ export function TokenPanel({
         </button>
         <button type="button" onClick={enc.undo} disabled={!enc.canUndo}>
           Undo move
-        </button>
-        <button type="button" onClick={onNewRound} title="Reset everyone's movement">
-          New round
         </button>
       </div>
       <input ref={fileInput} type="file" accept="image/*" hidden onChange={onFile} />
@@ -144,6 +142,48 @@ export function TokenPanel({
                       onChange={(e) => enc.updateToken(t.id, { speeds: { ...t.speeds, walk: Math.max(0, Number(e.target.value) || 0) } })}
                     />
                   </label>
+                  <label>
+                    Initiative bonus
+                    <input
+                      type="number"
+                      value={t.initiativeBonus ?? 0}
+                      onChange={(e) => enc.updateToken(t.id, { initiativeBonus: Math.round(Number(e.target.value) || 0) })}
+                    />
+                  </label>
+                  {t.side !== 'party' && (
+                    <label>
+                      When unseen
+                      <select
+                        value={behaviorOf(t)}
+                        onChange={(e) => {
+                          const behavior = e.target.value as Behavior;
+                          enc.updateToken(t.id, behavior === 'guard' ? { behavior, home: t.home ?? t.position, leash: t.leash ?? 6 } : { behavior });
+                        }}
+                      >
+                        {(Object.keys(BEHAVIOR_LABEL) as Behavior[]).map((b) => (
+                          <option key={b} value={b}>
+                            {BEHAVIOR_LABEL[b]}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  )}
+                  {t.side !== 'party' && behaviorOf(t) === 'guard' && (
+                    <>
+                      <label>
+                        Roams (squares)
+                        <input
+                          type="number"
+                          min={0}
+                          value={t.leash ?? 6}
+                          onChange={(e) => enc.updateToken(t.id, { leash: Math.max(0, Math.round(Number(e.target.value) || 0)) })}
+                        />
+                      </label>
+                      <button type="button" onClick={() => enc.updateToken(t.id, { home: t.position })} title="Guard the area around where it's standing now">
+                        Guard from here
+                      </button>
+                    </>
+                  )}
                   <label>
                     Color
                     <input type="color" value={t.color} onChange={(e) => enc.updateToken(t.id, { color: e.target.value })} />
