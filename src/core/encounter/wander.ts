@@ -12,6 +12,7 @@
  */
 import type { Behavior, DungeonMap, GridPolicy, Point, Token } from '../model/types';
 import { idx } from '../model/grid';
+import { isStandable } from '../model/terrain';
 import { buildMoveGrid, footprintSquares } from '../rules/dnd2024';
 import { computeReach, costTo, reachableDestinations } from '../rules/pathfinding';
 import type { Rng } from '../rng';
@@ -64,7 +65,7 @@ export function planWander(
   const leash = mover.leash ?? opts.defaultLeash;
   const candidates = reachableDestinations(reach).filter((p) => {
     if (behavior === 'guard' && Math.max(Math.abs(p.x - home.x), Math.abs(p.y - home.y)) > leash) return false;
-    return coveredSquares(map, mover, p).every((i) => map.terrain[i] === 'floor' || map.terrain[i] === 'stairs');
+    return coveredSquares(map, mover, p).every((i) => isStandable(map.terrain[i]));
   });
   if (candidates.length === 0) return null;
   // Prefer actually going somewhere over shuffling a square.

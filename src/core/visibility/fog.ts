@@ -8,20 +8,21 @@
 import { idx } from '../model/grid';
 import type { DungeonMap } from '../model/types';
 import { doorStates } from '../rules/dnd2024';
+import { TERRAIN } from '../model/terrain';
 
 export const FOG_HIDDEN = 0;
 export const FOG_EXPLORED = 1;
 export const FOG_VISIBLE = 2;
 
-/** Squares that block sight: rock, walls, solid obstacles and any door that isn't open. */
+/** Squares that block sight: rock, walls, solid obstacles, trees and any door that isn't open. */
 export function opacityGrid(map: DungeonMap): Uint8Array {
   const n = map.width * map.height;
   const out = new Uint8Array(n);
   const doors = doorStates(map);
   for (let i = 0; i < n; i++) {
     const t = map.terrain[i];
-    if (t === 'void' || t === 'wall' || t === 'obstacle') out[i] = 1;
-    else if (t === 'door' && (doors.get(i) ?? 'closed') !== 'open') out[i] = 1;
+    if (t === 'door') out[i] = (doors.get(i) ?? 'closed') !== 'open' ? 1 : 0;
+    else if (TERRAIN[t].opaque) out[i] = 1;
   }
   return out;
 }

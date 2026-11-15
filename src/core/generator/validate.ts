@@ -1,12 +1,12 @@
 import { idx, inBounds, ORTHOGONAL, rectCenter, rectsOverlap, terrainAt } from '../model/grid';
 import type { DungeonMap, RoomObject } from '../model/types';
+import { isWalkable } from '../model/terrain';
 
 export interface ValidationIssue {
   severity: 'error' | 'warning';
   message: string;
 }
 
-const WALKABLE = new Set(['floor', 'door', 'stairs', 'pit', 'hazard']);
 
 /**
  * Structural checks for any map (generated or hand-drawn). Doors count as
@@ -21,6 +21,8 @@ export function validateDungeon(map: DungeonMap): ValidationIssue[] {
     if (x < 0 || y < 0 || x + w > map.width || y + h > map.height)
       issues.push({ severity: 'error', message: `${r.label ?? r.id} extends outside the map.` });
   }
+  // Outdoor "rooms" are irregular areas whose bounding boxes may overlap.
+  if (map.style !== 'outdoor')
   for (let i = 0; i < rooms.length; i++)
     for (let j = i + 1; j < rooms.length; j++)
       if (rectsOverlap(rooms[i].rect, rooms[j].rect))
@@ -46,7 +48,7 @@ export function validateDungeon(map: DungeonMap): ValidationIssue[] {
           ny = y + d.y;
         if (!inBounds(map, nx, ny)) continue;
         const ni = idx(map, nx, ny);
-        if (seen[ni] || !WALKABLE.has(map.terrain[ni])) continue;
+        if (seen[ni] || !isWalkable(map.terrain[ni])) continue;
         seen[ni] = 1;
         queue.push(ni);
       }

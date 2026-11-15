@@ -3,6 +3,7 @@
  * tier, not tables from any book. Everything rolled is editable afterwards.
  */
 import { idx, rectCenter } from '../model/grid';
+import { isStandable } from '../model/terrain';
 import type { DungeonMap, ItemStack, LootObject, Point, Rarity, RoomObject } from '../model/types';
 import type { Rng } from '../rng';
 import { COIN_TYPES, type ItemDef } from './items';
@@ -142,7 +143,7 @@ function freeSpotInRoom(map: DungeonMap, room: RoomObject, rng: Rng, taken: Set<
     for (let y = room.rect.y; y < room.rect.y + room.rect.h; y++)
       for (let x = room.rect.x; x < room.rect.x + room.rect.w; x++) {
         const i = idx(map, x, y);
-        if (map.terrain[i] !== 'floor' || taken.has(i) || (x === c.x && y === c.y)) continue;
+        if (!isStandable(map.terrain[i]) || map.flags[i] & 1 || taken.has(i) || (x === c.x && y === c.y)) continue;
         // Prefer keeping the middle and the doorways clear; small rooms fall back to anywhere free.
         if (strict && ((Math.abs(x - c.x) <= 1 && Math.abs(y - c.y) <= 1) || near(x, y, 'door') || near(x, y, 'stairs'))) continue;
         out.push({ x, y });

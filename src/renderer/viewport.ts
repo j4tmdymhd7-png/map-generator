@@ -6,7 +6,7 @@ export interface Viewport {
   y: number;
 }
 
-export const MIN_ZOOM = 6;
+export const MIN_ZOOM = 2;
 export const MAX_ZOOM = 160;
 
 export function clampZoom(z: number): number {
