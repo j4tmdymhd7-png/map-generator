@@ -16,6 +16,14 @@ A browser-based 2D dungeon authoring and encounter tool for D&D (2024 rules). Ge
 - `ink.ts` draws walls as hand-inked lines, crosshatched rock, paper grain, numbered rooms, and symbols for doors (closed, open, locked), stairs, pits, hazards, pillars and rubble (difficult terrain). It is deliberately monochrome, so meaning is carried by line and symbol, not color.
 - `MapView.tsx` adds pan (drag or arrow keys), zoom (wheel, pinch, or +/−), fit (0), and a hovered-square readout. The map is rasterized to a cached bitmap and re-sharpened after zooming.
 
+**Milestone 3a — avatar tokens (done).**
+
+- Tokens show an uploaded portrait (center-cropped and shrunk to about 256 px WebP so saves stay small) or the character's initials. Party, enemy and neutral are told apart by ring style (solid, spiked, dashed), not by color.
+- Footprints follow creature size. Name banners appear once you're zoomed in.
+- Select a token to see every square it can still reach this turn. Hover a square to see the path, step markers (hollow squares mark difficult terrain) and the cost in feet.
+- Click to move: the token hops square by square along the path. Arrow keys plus Home/PgUp/End/PgDn move one square at a time. Shift-click is the DM override. There's undo and a "new round" reset.
+- The side panel adds and removes tokens and sets portrait, name, side, size, speed and color.
+
 Next: editor tools and undo (M2b), tokens/initiative/movement UI (M3), fog of war + player view window (M4), then the vertical-slice playtest (M5).
 
 ## Scripts
