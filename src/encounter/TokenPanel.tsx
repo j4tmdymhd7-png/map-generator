@@ -1,6 +1,11 @@
 import { useRef, useState } from 'react';
 import { SIZES, type Behavior, type Side, type Size, type Token } from '../core/model/types';
 import { behaviorOf } from '../core/encounter/wander';
+import type { CreatureTemplate } from '../core/library/creatures';
+import type { ItemDef } from '../core/loot/items';
+import type { ItemStack } from '../core/model/types';
+import { InventoryEditor } from './InventoryEditor';
+import { StatsEditor } from './StatsEditor';
 import { initials, portraitFromFile } from '../renderer/avatars';
 import type { Encounter } from './useEncounter';
 
@@ -21,9 +26,19 @@ const BEHAVIOR_LABEL: Record<Behavior, string> = { wander: 'Wanders', guard: 'Gu
 export function TokenPanel({
   enc,
   hideFromPlayers,
+  playerView = false,
+  creatures,
+  items,
+  onGive,
+  onDefeat,
   children,
 }: {
   enc: Encounter;
+  playerView?: boolean;
+  creatures: CreatureTemplate[];
+  items: ItemDef[];
+  onGive: (from: Token, stack: ItemStack, to: Token) => void;
+  onDefeat: (t: Token) => void;
   /** In player view: tokens the players can't currently see are left out of the list. */
   hideFromPlayers?: (t: Token) => boolean;
   children?: React.ReactNode;
@@ -61,6 +76,26 @@ export function TokenPanel({
           Undo move
         </button>
       </div>
+      {!playerView && (
+        <label className="spawn">
+          Add creature from library
+          <select
+            value=""
+            onChange={(e) => {
+              const tpl = creatures.find((c) => c.id === e.target.value);
+              if (tpl) enc.spawn(tpl);
+            }}
+          >
+            <option value="">Choose a creature…</option>
+            {creatures.map((c) => (
+              <option key={c.id} value={c.id}>
+                {c.name}
+                {c.stats.cr ? ` (CR ${c.stats.cr})` : ''}
+              </option>
+            ))}
+          </select>
+        </label>
+      )}
       <input ref={fileInput} type="file" accept="image/*" hidden onChange={onFile} />
       {error && (
         <p className="panel-error" role="alert">
@@ -103,6 +138,15 @@ export function TokenPanel({
                   <strong>
                     {enc.remaining(t)}/{t.speeds.walk} ft
                   </strong>
+                  {t.stats && (t.side === 'party' || !playerView) && (
+                    <>
+                      {' '}
+                      · AC <strong>{t.stats.ac}</strong> · HP{' '}
+                      <strong>
+                        {t.stats.hp}/{t.stats.maxHp}
+                      </strong>
+                    </>
+                  )}
                 </span>
                 {t.image && (
                   <button type="button" className="link-button" onClick={() => enc.updateToken(t.id, { image: undefined })}>
@@ -188,10 +232,34 @@ export function TokenPanel({
                     Color
                     <input type="color" value={t.color} onChange={(e) => enc.updateToken(t.id, { color: e.target.value })} />
                   </label>
+                  {t.side !== 'party' && !playerView && (
+                    <button type="button" onClick={() => onDefeat(t)} title="Remove it from the map and leave whatever it carried on the floor">
+                      Defeated: drop loot
+                    </button>
+                  )}
                   <button type="button" className="danger" onClick={() => enc.removeToken(t.id)}>
                     Remove token
                   </button>
                 </div>
+              )}
+              {selected && (t.side === 'party' || !playerView) && (
+                <>
+                  <details className="sub" open>
+                    <summary>Stats &amp; conditions</summary>
+                    <StatsEditor token={t} onChange={(patch) => enc.updateToken(t.id, patch)} />
+                  </details>
+                  <details className="sub">
+                    <summary>Inventory ({(t.inventory ?? []).length})</summary>
+                    <InventoryEditor
+                      stacks={t.inventory ?? []}
+                      onChange={(inventory) => enc.updateToken(t.id, { inventory })}
+                      library={items}
+                      recipients={enc.tokens.filter((o) => o.id !== t.id && o.side === 'party')}
+                      onGive={(stack, to) => onGive(t, stack, to)}
+                      emptyText="Carrying nothing."
+                    />
+                  </details>
+                </>
               )}
             </li>
           );

@@ -1,6 +1,7 @@
 /** Initiative: d20 + bonus, highest first. */
 import type { Token } from '../model/types';
 import type { Rng } from '../rng';
+import { initiativeBonusOf } from '../stats';
 
 export interface InitiativeEntry {
   tokenId: string;
@@ -15,7 +16,7 @@ export function rollInitiative(tokens: Token[], rng: Rng): InitiativeEntry[] {
   return sortInitiative(
     tokens.map((t) => {
       const roll = rng.int(1, 20);
-      const bonus = t.initiativeBonus ?? 0;
+      const bonus = initiativeBonusOf(t);
       return { tokenId: t.id, roll, bonus, total: roll + bonus, tiebreak: rng.next() };
     }),
   );

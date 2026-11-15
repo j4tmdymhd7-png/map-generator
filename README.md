@@ -37,6 +37,13 @@ A browser-based 2D dungeon authoring and encounter tool for D&D (2024 rules). Ge
 - **Combat:** Start combat rolls d20 + initiative bonus for the party and every creature they can see. The turn order is editable. End turn (or N) advances it and auto-selects whoever's up, resetting their movement. Creatures can join mid-fight, and End combat returns to exploration.
 - **Wandering:** between rounds, creatures the party can't see may move up to their speed. They only travel through squares the party can't see and never open doors, so wandering doesn't give itself away. Each creature has a "when unseen" behavior: wanders, guards an area (stays within N squares of home, like the demo Ogre and Goblin Boss guarding their lair), or stays put.
 
+**Milestone 5 — stats and loot (done).**
+
+- **Stat blocks** on every token, all editable: AC, HP/max/temp (with Damage and Heal), the six abilities with modifiers, CR, actions and traits, and DM notes. Initiative uses DEX unless a bonus is set. The 2024 conditions show as badges on the map. HP bars appear in the DM view only, and a creature at 0 HP is crossed out. A pennant marks whose turn it is.
+- **Creature library** (editable, saved in the browser): stat templates, "when unseen" behavior, whether a creature appears in random encounters and in what group size and how often, and whether it carries loot. Spawn any creature onto the map from the Tokens panel.
+- **Item library** (editable, saved in the browser): gear, consumables, gems, art, magic items and quest items, each with a player-facing description and a DM-only note. "Can turn up in random loot" can be switched off (DM-placed only), and "Unique" items appear at most once per campaign.
+- **Loot generation:** each new dungeon gets a hoard in the lair and chests in some rooms. Creatures that carry loot get pocket loot. Amounts scale with party level (tiers 1–4) using this project's own tuning, and magic item rarity is capped by tier. Click a chest to see the contents and edit, add, give or reroll them. "Defeated: drop loot" leaves a creature's belongings where it fell. Items move between inventories.
+
 Next: editor tools and undo (M2b), tokens/initiative/movement UI (M3), fog of war + player view window (M4), then the vertical-slice playtest (M5).
 
 ## Scripts
