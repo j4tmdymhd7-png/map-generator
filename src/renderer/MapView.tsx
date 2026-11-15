@@ -1,13 +1,25 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { DungeonMap, Point } from '../core/model/types';
 import { drawInkMap } from './ink';
 import { cacheCellSize, fitViewport, screenToCell, zoomAt, type Viewport } from './viewport';
+
+export interface MapViewController {
+  /** Ask for a redraw of the dynamic layer (tokens, previews, animation). */
+  requestDraw: () => void;
+}
 
 interface Props {
   map: DungeonMap;
   showGrid: boolean;
   roomNumbers: boolean;
   onHoverCell?: (cell: Point | null) => void;
+  /** Click (not drag) on a square. */
+  onCellClick?: (cell: Point, mods: { shift: boolean }) => void;
+  /** Draws tokens/previews in screen space on top of the map each frame. */
+  overlay?: (ctx: CanvasRenderingContext2D, view: Viewport) => void;
+  /** Return true if the key was handled (e.g. moving a selected token); otherwise the view pans/zooms. */
+  onKey?: (e: React.KeyboardEvent) => boolean;
+  controllerRef?: React.RefObject<MapViewController | null>;
 }
 
 interface Cache {
@@ -23,7 +35,7 @@ const PAN_STEP = 80;
  * bitmap (re-rendered at a sharper resolution after zooming settles) and
  * blitted each frame, so panning stays smooth on large maps.
  */
-export function MapView({ map, showGrid, roomNumbers, onHoverCell }: Props) {
+export function MapView({ map, showGrid, roomNumbers, onHoverCell, onCellClick, overlay, onKey, controllerRef }: Props) {
   const wrapRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const view = useRef<Viewport>({ zoom: 16, x: 0, y: 0 });
@@ -34,6 +46,11 @@ export function MapView({ map, showGrid, roomNumbers, onHoverCell }: Props) {
   const rebuildTimer = useRef(0);
   const pointers = useRef(new Map<number, { x: number; y: number }>());
   const pinch = useRef<{ dist: number } | null>(null);
+  const downAt = useRef<{ x: number; y: number; moved: boolean } | null>(null);
+  const overlayRef = useRef(overlay);
+  useLayoutEffect(() => {
+    overlayRef.current = overlay;
+  });
   const [zoomPct, setZoomPct] = useState(100);
 
   const rebuildCache = useCallback(() => {
@@ -67,6 +84,7 @@ export function MapView({ map, showGrid, roomNumbers, onHoverCell }: Props) {
       ctx.drawImage(cache.current.canvas, v.x, v.y, map.width * v.zoom, map.height * v.zoom);
       ctx.restore();
     }
+    overlayRef.current?.(ctx, v);
     const hc = hover.current;
     if (hc && hc.x >= 0 && hc.y >= 0 && hc.x < map.width && hc.y < map.height) {
       ctx.strokeStyle = 'rgba(42,36,31,0.9)';
@@ -80,6 +98,10 @@ export function MapView({ map, showGrid, roomNumbers, onHoverCell }: Props) {
   const requestDraw = useCallback(() => {
     if (!frame.current) frame.current = requestAnimationFrame(draw);
   }, [draw]);
+
+  useEffect(() => {
+    if (controllerRef) controllerRef.current = { requestDraw };
+  }, [controllerRef, requestDraw]);
 
   /** After a zoom, re-rasterize at the new resolution once the user pauses. */
   const scheduleSharpen = useCallback(() => {
@@ -163,7 +185,9 @@ export function MapView({ map, showGrid, roomNumbers, onHoverCell }: Props) {
 
   const onPointerDown = (e: React.PointerEvent) => {
     canvasRef.current!.setPointerCapture(e.pointerId);
-    pointers.current.set(e.pointerId, local(e));
+    const p = local(e);
+    pointers.current.set(e.pointerId, p);
+    downAt.current = pointers.current.size === 1 ? { ...p, moved: false } : null;
     if (pointers.current.size === 2) {
       const [a, b] = [...pointers.current.values()];
       pinch.current = { dist: Math.hypot(a.x - b.x, a.y - b.y) };
@@ -186,12 +210,21 @@ export function MapView({ map, showGrid, roomNumbers, onHoverCell }: Props) {
       setView(v);
       return;
     }
+    const d = downAt.current;
+    if (d && !d.moved && Math.hypot(p.x - d.x, p.y - d.y) < 5) return; // still a click, not a drag yet
+    if (d) d.moved = true;
     const v = view.current;
     setView({ ...v, x: v.x + (p.x - prev.x), y: v.y + (p.y - prev.y) });
     updateHover(p);
   };
 
   const onPointerUp = (e: React.PointerEvent) => {
+    const d = downAt.current;
+    if (d && !d.moved && pointers.current.size === 1 && e.type === 'pointerup') {
+      const cell = screenToCell(view.current, d.x, d.y);
+      if (cell.x >= 0 && cell.y >= 0 && cell.x < map.width && cell.y < map.height) onCellClick?.(cell, { shift: e.shiftKey });
+    }
+    downAt.current = null;
     pointers.current.delete(e.pointerId);
     if (pointers.current.size < 2) pinch.current = null;
   };
@@ -216,6 +249,10 @@ export function MapView({ map, showGrid, roomNumbers, onHoverCell }: Props) {
   };
 
   const onKeyDown = (e: React.KeyboardEvent) => {
+    if (onKey?.(e)) {
+      e.preventDefault();
+      return;
+    }
     const v = view.current;
     const keys: Record<string, () => void> = {
       ArrowLeft: () => setView({ ...v, x: v.x + PAN_STEP }),
@@ -241,7 +278,7 @@ export function MapView({ map, showGrid, roomNumbers, onHoverCell }: Props) {
         ref={canvasRef}
         tabIndex={0}
         role="img"
-        aria-label={`${map.title}. Drag or use arrow keys to pan; scroll or press plus and minus to zoom; press 0 to fit.`}
+        aria-label={`${map.title}. Drag or use arrow keys to pan; scroll or press plus and minus to zoom; press 0 to fit. Click a token to select it, then click a square to move.`}
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
         onPointerUp={onPointerUp}
