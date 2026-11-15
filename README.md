@@ -46,7 +46,14 @@ All checks are advisory and overridable. Rules live only in `src/core/rules/dnd2
 
 ## Generator
 
-`generateDungeon(seed, params)` places non-overlapping rooms, connects them with a minimum spanning tree plus optional loops, carves L-shaped corridors and dead-end spurs, wraps everything in walls, adds doors at 1-wide room entrances, and marks entrance/exit stairs. The same seed + params + `GENERATOR_VERSION` always produces the same map. Bump `GENERATOR_VERSION` whenever a change would alter existing seeds.
+`generateDungeon(seed, params)` (generator v2):
+
+- **Themes:** `dungeon` (built rooms, doors, straight passages) or `cave` (ragged caverns, winding tunnels, no doors).
+- **Room shapes:** rectangle, round, cross and cavern.
+- **Corridors** are routed by cost: they reuse earlier passages, keep clear of other rooms' walls, avoid running alongside each other, and prefer straight runs in dungeons.
+- **Furnishings:** colonnades, rubble (difficult terrain), pits and statues. Each is rolled back if it would cut a room off from its entrances.
+- Rooms are connected with a minimum spanning tree plus optional loops, with dead-end spurs, doors at 1-wide entrances, and entrance/exit stairs.
+- A test walks a Medium creature from the entrance to every room across 80 seeds of each theme. The same seed + params + `GENERATOR_VERSION` always produces the same map. Bump `GENERATOR_VERSION` whenever a change would alter existing seeds.
 
 ## Content and licensing
 

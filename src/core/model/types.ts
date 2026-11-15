@@ -47,9 +47,14 @@ interface BaseObject {
   label?: string;
 }
 
+export const ROOM_SHAPES = ['rect', 'round', 'cross', 'cave'] as const;
+export type RoomShape = (typeof ROOM_SHAPES)[number];
+
 export interface RoomObject extends BaseObject {
   kind: 'room';
+  /** Bounding box. Non-rect shapes fill only part of it. */
   rect: Rect;
+  shape?: RoomShape;
 }
 export interface CorridorObject extends BaseObject {
   kind: 'corridor';
