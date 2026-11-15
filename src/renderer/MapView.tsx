@@ -6,6 +6,8 @@ import { fitViewport, screenToCell, zoomAt, type Viewport } from './viewport';
 export interface MapViewController {
   /** Ask for a redraw of the dynamic layer (tokens, previews, animation). */
   requestDraw: () => void;
+  /** Pan so a square is in the middle of the screen, zooming in if needed. */
+  centerOn?: (p: Point) => void;
 }
 
 interface Props {
@@ -121,9 +123,6 @@ export function MapView({ map, showGrid, roomNumbers, onHoverCell, onCellClick, 
     if (!frame.current) frame.current = requestAnimationFrame(draw);
   }, [draw]);
 
-  useEffect(() => {
-    if (controllerRef) controllerRef.current = { requestDraw };
-  }, [controllerRef, requestDraw]);
 
   /** After a zoom, switch tile resolution once the user pauses. */
   const scheduleSharpen = useCallback(() => {
@@ -149,6 +148,18 @@ export function MapView({ map, showGrid, roomNumbers, onHoverCell, onCellClick, 
     },
     [requestDraw, scheduleSharpen],
   );
+
+  useEffect(() => {
+    if (!controllerRef) return;
+    controllerRef.current = {
+      requestDraw,
+      centerOn: (p: Point) => {
+        const { w, h } = size.current;
+        const zoom = Math.max(view.current.zoom, 14);
+        setView({ zoom, x: w / 2 - (p.x + 0.5) * zoom, y: h / 2 - (p.y + 0.5) * zoom });
+      },
+    };
+  }, [controllerRef, requestDraw, setView]);
 
   const fit = useCallback(() => {
     const { w, h } = size.current;

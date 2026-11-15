@@ -60,7 +60,24 @@ A browser-based 2D dungeon authoring and encounter tool for D&D (2024 rules). Ge
 - New terrain: ground, road, tree (blocks movement and sight), brush and shallow water (difficult), deep water (blocks walking), furniture. All of it goes through one terrain table that the rules, fog, placement and validation share.
 - **Tiled renderer:** the map is drawn in 16×16-square tiles at the current zoom with per-square hashed randomness, so even 200×200 maps stay sharp and tiles line up seamlessly.
 
-Next: editor tools and undo (M2b), tokens/initiative/movement UI (M3), fog of war + player view window (M4), then the vertical-slice playtest (M5).
+**Milestone 7 — campaigns, places and people (done).**
+
+- **Campaigns are saved** in the browser (IndexedDB) as you play: every map, token, NPC, loot pile, door and the fog on each map. The Campaign button renames, switches and starts campaigns, and exports or imports a `.campaign.json` file for backups or moving computers. Files are checked on import (schema version 2; version 1 files are upgraded).
+- **Maps in a campaign:** New map adds one from the toolbar recipe and moves the party there. Replace this map regenerates the current one. The Map menu shows them all as a tree (places nest under the map they're in) and marks where the party is. Looking at another map doesn't move the party.
+- **Points of interest:** towns and cities get taverns, inns, temples, smithies, an apothecary, general stores, stables, barracks, noble estates, docks on the river, a gatehouse at each gate, the market square, and a thieves' den that only the DM sees. Wilderness clearings become standing stones, ruins, campsites, a hermit's hut, a ranger's lodge, an abandoned farm, bandit camps, shrines and a cave mouth; some shrines and caves are hidden until found (DM sets the search DC). Each kind has its own ink symbol, every place has a name, and a ◆ marks the way in. Click a place for its card: name, what players see, DM notes, who's there.
+- **Going inside:** Go inside (or select a hero by the door and press E) generates the interior the first time and moves the party in: a tavern, inn, shop, smithy, temple, barracks, den, warehouse, stables, manor or cottage floor plan, or a cave or crypt under ruins. Leave (or E at the way out) returns the party to the door they came in by. Interiors are generated from the outer map's seed, so they're the same every time.
+- **NPCs are reference cards** the DM plays from: name, occupation, what players call them before introductions ("Soot-streaked smith"), attitude (Friendly, Indifferent, Hostile), appearance, mannerism, want, secret, rumors and notes, all editable. Every place gets its proprietor and sometimes staff. Merchants sell from the item library ("Sell to…" hands the item over). People who work outdoors (market, bandit camps) stand at their place; indoor staff appear when the party goes in. In Player view an NPC shows by description until you tick Introduced. People & places lists everyone and every place, with search.
+- **Names** come from original generic-fantasy tables. The name style is a campaign setting, ready for regional styles later.
+- **Ready for simulation later:** NPC cards carry an optional daily schedule and the campaign carries a world clock; neither is acted on yet.
+
+**Milestone 8 — player screen and a cleaner screen (done).**
+
+- **Player screen ↗** opens a second window with only what the players may see: the map under fog, the party, creatures in sight, places they've found, and NPCs under their descriptions until introduced. No controls, HP bars, room numbers or DM-only places. It follows the DM window live (moves animate, doors and fog update) over a same-browser BroadcastChannel. Share it in Discord with Screen Share → the window.
+- **Preview as players** shows the same thing in the DM window.
+- One toolbar: campaign menu, map menu, New map (now a dialog), People & places, Library, View (grid, room numbers, fog), Preview, Player screen, save status and **?** help.
+- Side-panel settings fold into Exploration, Loot and Random encounters sections. Instructions moved into tooltips and a **How to use** screen (shown once on first visit, then from **?**).
+
+Next: NPC routines and the world clock, editor tools and undo (M2b), and importing monster stats into the private library.
 
 ## Scripts
 
