@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { ROOM_SHAPES, SCHEMA_VERSION, SIZES, TERRAINS, type Campaign } from './types';
+import { BEHAVIORS, ROOM_SHAPES, SCHEMA_VERSION, SIZES, TERRAINS, type Campaign } from './types';
 
 const point = z.object({ x: z.number().int(), y: z.number().int() });
 const rect = z.object({
@@ -74,6 +74,10 @@ const token = z.object({
   side: z.enum(['party', 'enemy', 'neutral']),
   conditions: z.array(z.string()),
   visibility,
+  initiativeBonus: z.number().int().optional(),
+  behavior: z.enum(BEHAVIORS).optional(),
+  home: point.optional(),
+  leash: z.number().int().nonnegative().optional(),
 });
 
 export const campaignSchema = z.object({

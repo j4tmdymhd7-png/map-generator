@@ -15,6 +15,8 @@ interface Props {
   onHoverCell?: (cell: Point | null) => void;
   /** Click (not drag) on a square. */
   onCellClick?: (cell: Point, mods: { shift: boolean }) => void;
+  /** Right-click on a square. */
+  onCellContext?: (cell: Point) => void;
   /** Draws tokens/previews in screen space on top of the map each frame. */
   overlay?: (ctx: CanvasRenderingContext2D, view: Viewport) => void;
   /** Return true if the key was handled (e.g. moving a selected token); otherwise the view pans/zooms. */
@@ -35,7 +37,7 @@ const PAN_STEP = 80;
  * bitmap (re-rendered at a sharper resolution after zooming settles) and
  * blitted each frame, so panning stays smooth on large maps.
  */
-export function MapView({ map, showGrid, roomNumbers, onHoverCell, onCellClick, overlay, onKey, controllerRef }: Props) {
+export function MapView({ map, showGrid, roomNumbers, onHoverCell, onCellClick, onCellContext, overlay, onKey, controllerRef }: Props) {
   const wrapRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const view = useRef<Viewport>({ zoom: 16, x: 0, y: 0 });
@@ -133,34 +135,42 @@ export function MapView({ map, showGrid, roomNumbers, onHoverCell, onCellClick, 
     if (w && h) setView(fitViewport(map.width, map.height, w, h));
   }, [map.width, map.height, setView]);
 
-  // Size the canvas to its container (and the device pixel ratio).
+  // Size the canvas to its container (and the device pixel ratio). Fit once,
+  // the first time the canvas gets a real size; later resizes keep the view.
+  const fitted = useRef(false);
+  const fitRef = useRef(fit);
+  const drawRef = useRef(requestDraw);
+  useLayoutEffect(() => {
+    fitRef.current = fit;
+    drawRef.current = requestDraw;
+  });
   useEffect(() => {
     const wrap = wrapRef.current,
       canvas = canvasRef.current;
     if (!wrap || !canvas) return;
-    let first = true;
     const ro = new ResizeObserver(() => {
       const rect = wrap.getBoundingClientRect();
       const dpr = window.devicePixelRatio || 1;
       size.current = { w: rect.width, h: rect.height, dpr };
       canvas.width = Math.round(rect.width * dpr);
       canvas.height = Math.round(rect.height * dpr);
-      if (first) {
-        first = false;
-        fit();
+      if (!fitted.current && rect.width > 0) {
+        fitted.current = true;
+        fitRef.current();
       }
-      requestDraw();
+      drawRef.current();
     });
     ro.observe(wrap);
     return () => ro.disconnect();
-  }, [fit, requestDraw]);
+  }, []);
 
-  // New map or new drawing options: rebuild the bitmap. Refit only for a new map.
-  const lastMap = useRef<DungeonMap | null>(null);
+  // New map, an edit (e.g. a door opening) or new drawing options: rebuild the
+  // bitmap. Refit only for a different map, not for edits to the same one.
+  const lastMapId = useRef<string | null>(null);
   useEffect(() => {
     cache.current = null;
-    if (lastMap.current !== map) {
-      lastMap.current = map;
+    if (lastMapId.current !== map.id) {
+      lastMapId.current = map.id;
       fit();
     }
     requestDraw();
@@ -284,6 +294,13 @@ export function MapView({ map, showGrid, roomNumbers, onHoverCell, onCellClick, 
         onPointerUp={onPointerUp}
         onPointerCancel={onPointerUp}
         onPointerLeave={() => updateHover(null)}
+        onContextMenu={(e) => {
+          if (!onCellContext) return;
+          e.preventDefault();
+          const p = local(e);
+          const cell = screenToCell(view.current, p.x, p.y);
+          if (cell.x >= 0 && cell.y >= 0 && cell.x < map.width && cell.y < map.height) onCellContext(cell);
+        }}
         onKeyDown={onKeyDown}
       />
       <div className="zoom-controls" role="group" aria-label="Zoom">

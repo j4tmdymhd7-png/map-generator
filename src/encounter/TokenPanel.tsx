@@ -1,5 +1,6 @@
 import { useRef, useState } from 'react';
-import { SIZES, type Side, type Size, type Token } from '../core/model/types';
+import { SIZES, type Behavior, type Side, type Size, type Token } from '../core/model/types';
+import { behaviorOf } from '../core/encounter/wander';
 import { initials, portraitFromFile } from '../renderer/avatars';
 import type { Encounter } from './useEncounter';
 
@@ -15,7 +16,18 @@ function Avatar({ t }: { t: Token }) {
   );
 }
 
-export function TokenPanel({ enc }: { enc: Encounter }) {
+const BEHAVIOR_LABEL: Record<Behavior, string> = { wander: 'Wanders', guard: 'Guards an area', still: 'Stays put' };
+
+export function TokenPanel({
+  enc,
+  hideFromPlayers,
+  children,
+}: {
+  enc: Encounter;
+  /** In player view: tokens the players can't currently see are left out of the list. */
+  hideFromPlayers?: (t: Token) => boolean;
+  children?: React.ReactNode;
+}) {
   const fileInput = useRef<HTMLInputElement>(null);
   const [uploadFor, setUploadFor] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -39,15 +51,14 @@ export function TokenPanel({ enc }: { enc: Encounter }) {
 
   return (
     <aside className="token-panel" aria-label="Tokens">
+      {children}
+      <h2>Tokens</h2>
       <div className="panel-actions">
         <button type="button" onClick={enc.addToken}>
           + Add token
         </button>
         <button type="button" onClick={enc.undo} disabled={!enc.canUndo}>
           Undo move
-        </button>
-        <button type="button" onClick={enc.newRound} title="Reset everyone's movement">
-          New round
         </button>
       </div>
       <input ref={fileInput} type="file" accept="image/*" hidden onChange={onFile} />
@@ -57,7 +68,7 @@ export function TokenPanel({ enc }: { enc: Encounter }) {
         </p>
       )}
       <ul className="token-list">
-        {enc.tokens.map((t) => {
+        {enc.tokens.filter((t) => !hideFromPlayers?.(t)).map((t) => {
           const selected = enc.selected?.id === t.id;
           return (
             <li key={t.id} className={selected ? 'token-row selected' : 'token-row'}>
@@ -132,6 +143,48 @@ export function TokenPanel({ enc }: { enc: Encounter }) {
                     />
                   </label>
                   <label>
+                    Initiative bonus
+                    <input
+                      type="number"
+                      value={t.initiativeBonus ?? 0}
+                      onChange={(e) => enc.updateToken(t.id, { initiativeBonus: Math.round(Number(e.target.value) || 0) })}
+                    />
+                  </label>
+                  {t.side !== 'party' && (
+                    <label>
+                      When unseen
+                      <select
+                        value={behaviorOf(t)}
+                        onChange={(e) => {
+                          const behavior = e.target.value as Behavior;
+                          enc.updateToken(t.id, behavior === 'guard' ? { behavior, home: t.home ?? t.position, leash: t.leash ?? 6 } : { behavior });
+                        }}
+                      >
+                        {(Object.keys(BEHAVIOR_LABEL) as Behavior[]).map((b) => (
+                          <option key={b} value={b}>
+                            {BEHAVIOR_LABEL[b]}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  )}
+                  {t.side !== 'party' && behaviorOf(t) === 'guard' && (
+                    <>
+                      <label>
+                        Roams (squares)
+                        <input
+                          type="number"
+                          min={0}
+                          value={t.leash ?? 6}
+                          onChange={(e) => enc.updateToken(t.id, { leash: Math.max(0, Math.round(Number(e.target.value) || 0)) })}
+                        />
+                      </label>
+                      <button type="button" onClick={() => enc.updateToken(t.id, { home: t.position })} title="Guard the area around where it's standing now">
+                        Guard from here
+                      </button>
+                    </>
+                  )}
+                  <label>
                     Color
                     <input type="color" value={t.color} onChange={(e) => enc.updateToken(t.id, { color: e.target.value })} />
                   </label>
@@ -151,7 +204,9 @@ export function TokenPanel({ enc }: { enc: Encounter }) {
             <li key={a}>{a}</li>
           ))}
         </ul>
-        <p>Hold Shift when clicking to override the rules and place a token anywhere.</p>
+        <p>Hold Shift when clicking a square to override the rules and place the selected token anywhere.</p>
+        <p>Doors: click (or right-click) to open/close, Shift-click to lock/unlock, or press O next to one.</p>
+        <p>Sight is simple line of sight within the party's sight range. It doesn't model light or darkvision.</p>
         <p>Token rings: party = solid, enemy = spiked, neutral = dashed.</p>
       </details>
     </aside>

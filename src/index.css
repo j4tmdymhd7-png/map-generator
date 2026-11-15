@@ -275,3 +275,143 @@ button:disabled {
 .token-panel {
   overflow-x: hidden;
 }
+.toolbar-sep {
+  width: 1px;
+  align-self: stretch;
+  background: #33333a;
+}
+.mode-badge {
+  font-size: 0.8rem;
+  padding: 0.1rem 0.5rem;
+  border-radius: 999px;
+  border: 1px solid #e9e9ec;
+}
+.token-panel h2 {
+  font-size: 1rem;
+  margin: 0.25rem 0 0.6rem;
+}
+.token-panel h3 {
+  font-size: 0.9rem;
+  margin: 0.9rem 0 0.4rem;
+}
+.play-controls {
+  display: grid;
+  gap: 0.5rem;
+  padding-bottom: 0.9rem;
+  margin-bottom: 0.9rem;
+  border-bottom: 1px solid #2f2f36;
+}
+.play-controls label {
+  display: grid;
+  gap: 0.2rem;
+  font-size: 0.85rem;
+  color: #c9c9d1;
+}
+.play-controls label.check {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+.play-controls .row {
+  display: flex;
+  gap: 0.4rem;
+}
+.play-controls .fine {
+  margin: 0;
+  font-size: 0.78rem;
+  color: #9a9aa6;
+}
+.turn-panel {
+  display: grid;
+  gap: 0.5rem;
+  padding-bottom: 0.9rem;
+  margin-bottom: 0.9rem;
+  border-bottom: 1px solid #2f2f36;
+}
+.turn-panel .row {
+  display: flex;
+  gap: 0.4rem;
+}
+.turn-panel .fine {
+  margin: 0;
+  font-size: 0.78rem;
+  color: #9a9aa6;
+}
+.turn-mode {
+  font-weight: normal;
+  font-size: 0.8rem;
+  margin-left: 0.4rem;
+  padding: 0.05rem 0.45rem;
+  border: 1px solid #77777f;
+  border-radius: 999px;
+}
+button.primary {
+  background: #e9e9ec;
+  color: #19191d;
+  font-weight: 600;
+}
+button.primary:hover {
+  background: #ffffff;
+}
+.initiative {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 0.25rem;
+}
+.initiative li {
+  display: grid;
+  grid-template-columns: 1rem 1.8rem minmax(0, 1fr) 3.4rem 3.2rem;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.25rem 0.35rem;
+  border-radius: 6px;
+  border: 1px solid transparent;
+}
+.initiative li.active {
+  border-color: #e9e9ec;
+  background: #26262c;
+  font-weight: 600;
+}
+.mini-avatar {
+  width: 1.7rem;
+  height: 1.7rem;
+  border-radius: 50%;
+  overflow: hidden;
+  display: inline-grid;
+  place-items: center;
+  font: bold 0.7rem Georgia, serif;
+  background: #fbf6e8;
+  color: #2a241f;
+}
+.mini-avatar img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.initiative .name {
+  text-align: left;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: inherit;
+  font-size: 0.9rem;
+  font-weight: inherit;
+}
+.init-input {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 0.2rem 0.3rem;
+}
+.init-move {
+  font-size: 0.8rem;
+  color: #c9c9d1;
+  text-align: right;
+}
+.turn-panel .join {
+  display: grid;
+  gap: 0.2rem;
+  font-size: 0.85rem;
+  color: #c9c9d1;
+}

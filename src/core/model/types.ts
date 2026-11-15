@@ -121,6 +121,13 @@ export interface Senses {
   truesight?: number;
 }
 
+/**
+ * How a creature acts when the party can't see it.
+ * wander: roams freely; guard: roams but stays within `leash` squares of `home`; still: stays put.
+ */
+export const BEHAVIORS = ['wander', 'guard', 'still'] as const;
+export type Behavior = (typeof BEHAVIORS)[number];
+
 export interface Token {
   id: string;
   mapId: string;
@@ -136,6 +143,13 @@ export interface Token {
   /** Lowercase condition names, e.g. 'incapacitated', 'prone'. */
   conditions: string[];
   visibility: Visibility;
+  /** Added to a d20 roll for initiative. */
+  initiativeBonus?: number;
+  behavior?: Behavior;
+  /** Center of a guard's territory. */
+  home?: Point;
+  /** Max squares a guard roams from home. */
+  leash?: number;
 }
 
 export type DiagonalPolicy =
