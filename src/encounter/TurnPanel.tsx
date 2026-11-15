@@ -24,16 +24,13 @@ export function TurnPanel({ enc, onNextRound, onStartCombat, onEndTurn, hidden }
       {!combat ? (
         <>
           <div className="row">
-            <button type="button" className="primary" onClick={onNextRound} title="Shortcut: N">
+            <button type="button" className="primary" onClick={onNextRound} title="Everyone's movement resets; unseen monsters may move (N)">
               Next round
             </button>
-            <button type="button" onClick={onStartCombat}>
+            <button type="button" onClick={onStartCombat} title="Roll initiative (d20 + bonus) for the party and every creature they can see">
               Start combat
             </button>
           </div>
-          <p className="fine">
-            Next round resets everyone's movement. Start combat rolls initiative (d20 + bonus) for the party and any creature they can see.
-          </p>
         </>
       ) : (
         <>

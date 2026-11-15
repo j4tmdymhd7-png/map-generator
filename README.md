@@ -70,7 +70,14 @@ A browser-based 2D dungeon authoring and encounter tool for D&D (2024 rules). Ge
 - **Names** come from original generic-fantasy tables. The name style is a campaign setting, ready for regional styles later.
 - **Ready for simulation later:** NPC cards carry an optional daily schedule and the campaign carries a world clock; neither is acted on yet.
 
-Next: NPC routines and the world clock, a separate player-view window for Discord, editor tools and undo (M2b), and importing monster stats into the private library.
+**Milestone 8 — player screen and a cleaner screen (done).**
+
+- **Player screen ↗** opens a second window with only what the players may see: the map under fog, the party, creatures in sight, places they've found, and NPCs under their descriptions until introduced. No controls, HP bars, room numbers or DM-only places. It follows the DM window live (moves animate, doors and fog update) over a same-browser BroadcastChannel. Share it in Discord with Screen Share → the window.
+- **Preview as players** shows the same thing in the DM window.
+- One toolbar: campaign menu, map menu, New map (now a dialog), People & places, Library, View (grid, room numbers, fog), Preview, Player screen, save status and **?** help.
+- Side-panel settings fold into Exploration, Loot and Random encounters sections. Instructions moved into tooltips and a **How to use** screen (shown once on first visit, then from **?**).
+
+Next: NPC routines and the world clock, editor tools and undo (M2b), and importing monster stats into the private library.
 
 ## Scripts
 

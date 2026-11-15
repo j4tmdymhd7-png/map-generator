@@ -20,6 +20,9 @@ import { drawPois, poiAt } from './renderer/poiLayer';
 import { NpcCard } from './world/NpcCard';
 import { PeopleDialog } from './world/PeopleDialog';
 import { PoiPanel } from './world/PoiPanel';
+import { openChannel, openPlayerScreen, playerSafeMap, type PlayerMessage } from './player/channel';
+import { NewMapDialog } from './campaign/NewMapDialog';
+import { HelpDialog } from './HelpDialog';
 import { footprintSquares } from './core/rules/dnd2024';
 import { createRng, randomSeed } from './core/rng';
 import { computeVisible, FOG_EXPLORED, FOG_HIDDEN, FOG_VISIBLE, updateFog } from './core/visibility/fog';
@@ -156,6 +159,14 @@ function Workspace({
   const [libraryOpen, setLibraryOpen] = useState(false);
   const [peopleOpen, setPeopleOpen] = useState(false);
   const [campaignOpen, setCampaignOpen] = useState(false);
+  const [newMapOpen, setNewMapOpen] = useState(false);
+  const [helpOpen, setHelpOpen] = useState(() => {
+    try {
+      return !localStorage.getItem('dmg.seenHelp.v1');
+    } catch {
+      return false;
+    }
+  });
   const [lootId, setLootId] = useState<string | null>(null);
   const [poiId, setPoiId] = useState<string | null>(null);
   const [npcId, setNpcId] = useState<string | null>(null);
@@ -390,6 +401,57 @@ function Workspace({
     );
   };
 
+
+  // ---- Player screen (a second window to share on Discord) -------------------
+  const playerState = (): PlayerMessage => ({
+    type: 'state',
+    map: playerSafeMap(map),
+    tokens: (fogOn ? enc.tokens.filter(playersSee) : enc.tokens).map(disguise),
+    pois: pois.filter((p) => p.visibility === 'public' && poiSeen(p)),
+    fog: fogOn ? fog : null,
+    activeId: enc.activeId,
+    campaign: name,
+  });
+  const playerStateRef = useRef(playerState);
+  useEffect(() => {
+    playerStateRef.current = playerState;
+  });
+  const channel = useRef<BroadcastChannel | null>(null);
+  const screenOpen = useRef(false);
+  useEffect(() => {
+    const ch = openChannel();
+    channel.current = ch;
+    if (!ch) return;
+    ch.onmessage = (e: MessageEvent<PlayerMessage>) => {
+      if (e.data.type !== 'hello') return;
+      screenOpen.current = true;
+      ch.postMessage(playerStateRef.current());
+    };
+    const bye = () => ch.postMessage({ type: 'bye' } satisfies PlayerMessage);
+    window.addEventListener('pagehide', bye);
+    return () => {
+      bye();
+      window.removeEventListener('pagehide', bye);
+      ch.close();
+    };
+  }, []);
+  useEffect(() => {
+    if (screenOpen.current) channel.current?.postMessage(playerStateRef.current());
+  }, [map, enc.tokens, fog, fogOn, npcs, enc.activeId]);
+  const lastAnim = useRef<string>('');
+  const sendAnim = () => {
+    if (!screenOpen.current) return;
+    const a = enc.animating.current;
+    const key = a ? `${a.id}:${a.pos.x.toFixed(2)}:${a.pos.y.toFixed(2)}` : '';
+    if (key === lastAnim.current) return;
+    lastAnim.current = key;
+    channel.current?.postMessage({ type: 'anim', anim: a } satisfies PlayerMessage);
+  };
+  const showPlayerScreen = () => {
+    if (!openPlayerScreen()) setMessage({ text: 'The browser blocked the player screen window. Allow pop-ups for this page and try again.' });
+    else setMessage({ text: 'Player screen opened. Share that window in Discord (Screen Share → choose the window).' });
+  };
+
   // ---- Saving ------------------------------------------------------------------
   const [saveState, setSaveState] = useState<'saved' | 'saving' | 'error'>('saved');
   const snapshot = (): Campaign => {
@@ -499,6 +561,7 @@ function Workspace({
       showHp: !playerView,
       activeId: enc.activeId,
     });
+    sendAnim();
   };
 
   // ---- Input ----------------------------------------------------------------
@@ -604,8 +667,8 @@ function Workspace({
   const activeToken = enc.activeId ? enc.tokens.find((t) => t.id === enc.activeId) : null;
   const turnPrefix = activeToken ? `${activeToken.label}'s turn · ` : '';
   const hint = enc.selected
-    ? `${turnPrefix}${enc.selected.label} selected · ${enc.remaining(enc.selected)} ft left · click a square to move, O to open/close an adjacent door, Esc to deselect`
-    : `${turnPrefix}${map.width}×${map.height} · ${pois.length ? `${pois.length} places · ` : `${rooms} ${map.style === 'outdoor' ? 'places' : 'rooms'} · `}${lootObjects.length} chests · N for ${enc.combat ? 'next turn' : 'next round'} · click a token to select it · click a door to open or close it (Shift-click to lock)${pois.length ? ' · click a place for its card' : ''}`;
+    ? `${turnPrefix}${enc.selected.label}: ${enc.remaining(enc.selected)} ft left · click a square to move · Esc to deselect`
+    : `${turnPrefix}${map.title} · ${pois.length ? `${pois.length} places` : `${rooms} ${map.style === 'outdoor' ? 'areas' : 'rooms'}`} · click a token to select it · N: ${enc.combat ? 'next turn' : 'next round'} · ? for help`;
   const encView = playerView ? { ...enc, tokens: enc.tokens.map(disguise), selected: enc.selected && disguise(enc.selected) } : enc;
   const selectedNpc = enc.selected?.npcId ? npcById.get(enc.selected.npcId) : npcId ? npcById.get(npcId) : undefined;
   const tree = mapTree(maps);
@@ -614,15 +677,15 @@ function Workspace({
     <div className="app">
       <header className="topbar">
         <strong>{APP_NAME}</strong> <span className="version">v{APP_VERSION}</span>
-        {playerView && <span className="mode-badge">Player view</span>}
+        {playerView && <span className="mode-badge">Previewing as players</span>}
         <span className="date">{BUILD_DATE}</span>
       </header>
-      <div className="toolbar campaign-bar" role="toolbar" aria-label="Campaign">
-        <button type="button" onClick={() => setCampaignOpen(true)} title="Rename, switch, back up or start campaigns">
-          Campaign: <strong>{name || 'Untitled'}</strong>
+      <div className="toolbar" role="toolbar" aria-label="Campaign and view">
+        <button type="button" onClick={() => setCampaignOpen(true)} title="Campaign: rename, switch, start a new one, or back up to a file">
+          <strong>{name || 'Untitled'}</strong> ▾
         </button>
-        <label>
-          Map{' '}
+        <label title="Every map in this campaign. Looking at another map doesn't move the party.">
+          <span className="sr-only">Map</span>
           <select value={map.id} onChange={(e) => goTo(maps.find((m) => m.id === e.target.value)!)} aria-label="Map on screen">
             {tree.map(({ map: m, depth }) => (
               <option key={m.id} value={m.id}>
@@ -635,80 +698,46 @@ function Workspace({
           </select>
         </label>
         {parentMap && (
-          <button type="button" onClick={leave} title="The party walks back out">
-            Leave to {parentMap.title}
+          <button type="button" onClick={leave} title="The party walks back out (or press E at the way out)">
+            ← Leave to {parentMap.title}
           </button>
         )}
-        <button type="button" onClick={() => setPeopleOpen(true)}>
+        <button type="button" onClick={() => setNewMapOpen(true)} title="Generate a tavern, dungeon, cave, town, forest, city or wilderness">
+          + New map
+        </button>
+        <button type="button" onClick={() => setPeopleOpen(true)} title="Every NPC in the campaign and every place on this map">
           People &amp; places
         </button>
-        <span className={`save-state ${saveState}`} role="status">
-          {saveState === 'saved' ? 'Saved' : saveState === 'saving' ? 'Saving…' : 'Not saved: browser storage unavailable. Export a file to keep your work.'}
-        </span>
-      </div>
-      <div className="toolbar" role="toolbar" aria-label="Map options">
-        <label>
-          Seed <input value={seed} onChange={(e) => setSeed(e.target.value)} aria-label="Generator seed" />
-        </label>
-        <button type="button" onClick={() => setSeed(randomSeed())} aria-label="New random seed">
-          Random seed
-        </button>
-        <label title={SIZE_INFO[size].blurb}>
-          Size{' '}
-          <select
-            value={size}
-            onChange={(e) => {
-              const next = e.target.value as MapSize;
-              setSize(next);
-              setKind(SIZE_INFO[next].kinds[0].kind);
-            }}
-          >
-            {MAP_SIZES.map((s) => (
-              <option key={s} value={s}>
-                {SIZE_INFO[s].label}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label>
-          Type{' '}
-          <select value={kind} onChange={(e) => setKind(e.target.value as MapKind)}>
-            {SIZE_INFO[size].kinds.map((k) => (
-              <option key={k.kind} value={k.kind}>
-                {k.label}
-              </option>
-            ))}
-          </select>
-        </label>
-        <button type="button" className="primary" onClick={() => newMap(false)} title="Add a map to the campaign and move the party there">
-          New map
-        </button>
-        <button
-          type="button"
-          onClick={() => newMap(true)}
-          disabled={!!map.parent}
-          title={map.parent ? 'Places inside another map are generated from it; replace the outer map instead' : 'Generate a different map in place of this one'}
-        >
-          Replace this map
-        </button>
-        <span className="toolbar-sep" aria-hidden />
-        <label className="check">
-          <input type="checkbox" checked={showGrid} onChange={(e) => setShowGrid(e.target.checked)} /> Grid
-        </label>
-        <label className="check">
-          <input type="checkbox" checked={roomNumbers} onChange={(e) => setRoomNumbers(e.target.checked)} /> Room numbers
-        </label>
-        <span className="toolbar-sep" aria-hidden />
-        <button type="button" onClick={() => setLibraryOpen(true)}>
+        <button type="button" onClick={() => setLibraryOpen(true)} title="Your creatures and items: stats, loot, quest items">
           Library
         </button>
         <span className="toolbar-sep" aria-hidden />
-        <label className="check">
-          <input type="checkbox" checked={fogOn} onChange={(e) => setFogOn(e.target.checked)} /> Fog of war
+        <details className="view-menu">
+          <summary title="Grid, room numbers and fog of war">View</summary>
+          <div className="view-menu-body">
+            <label className="check">
+              <input type="checkbox" checked={showGrid} onChange={(e) => setShowGrid(e.target.checked)} /> Grid
+            </label>
+            <label className="check">
+              <input type="checkbox" checked={roomNumbers} onChange={(e) => setRoomNumbers(e.target.checked)} /> Room numbers
+            </label>
+            <label className="check" title="Hide what the party hasn't seen">
+              <input type="checkbox" checked={fogOn} onChange={(e) => setFogOn(e.target.checked)} /> Fog of war
+            </label>
+          </div>
+        </details>
+        <label className="check" title={fogOn ? 'See this window exactly as the players do' : 'Turn on fog of war first'}>
+          <input type="checkbox" checked={playerView} onChange={(e) => setPlayerView(e.target.checked)} disabled={!fogOn} /> Preview as players
         </label>
-        <label className="check">
-          <input type="checkbox" checked={playerView} onChange={(e) => setPlayerView(e.target.checked)} disabled={!fogOn} /> Player view
-        </label>
+        <button type="button" className="primary" onClick={showPlayerScreen} title="Open a second window showing only what players see, to share in Discord">
+          Player screen ↗
+        </button>
+        <span className={`save-state ${saveState}`} role="status" title="Saved automatically in this browser. Export from the campaign menu to back up.">
+          {saveState === 'saved' ? 'Saved' : saveState === 'saving' ? 'Saving…' : 'Not saved: export a file to keep your work'}
+        </span>
+        <button type="button" className="help-button" onClick={() => setHelpOpen(true)} title="How to use this tool" aria-label="How to use">
+          ?
+        </button>
       </div>
       <div className="workspace">
         <MapView
@@ -795,64 +824,96 @@ function Workspace({
             onEndTurn={endTurn}
             hidden={playerView ? (t) => !playersSee(t) : undefined}
           />
-          <section className="play-controls" aria-label="Play settings">
-            <h2>Play</h2>
-            <label>
-              Party sight
-              <select value={sightFt} onChange={(e) => setSightFt(Number(e.target.value))}>
-                {[30, 60, 90, 120, 240].map((ft) => (
-                  <option key={ft} value={ft}>
-                    {ft} ft
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label className="check">
-              <input type="checkbox" checked={autoDoors} onChange={(e) => setAutoDoors(e.target.checked)} /> Open doors when walking through
-            </label>
-            <div className="row">
-              <button type="button" onClick={revealAll} disabled={!fogOn}>
-                Reveal map
-              </button>
-              <button type="button" onClick={reshroud} disabled={!fogOn}>
-                Re-shroud
-              </button>
-            </div>
-            <label className="check">
-              <input type="checkbox" checked={wandering} onChange={(e) => setWandering(e.target.checked)} /> Unseen monsters wander between rounds
-            </label>
-            <h3>Loot</h3>
-            <label>
-              Party level
-              <select value={partyLevel} onChange={(e) => setPartyLevel(Number(e.target.value))}>
-                {Array.from({ length: 20 }, (_, i) => i + 1).map((l) => (
-                  <option key={l} value={l}>
-                    Level {l} (tier {tierForLevel(l)})
-                  </option>
-                ))}
-              </select>
-            </label>
-            <button type="button" onClick={restock}>
-              Reroll dungeon loot ({lootObjects.length} chests)
-            </button>
-            <p className="fine">Click a chest (with no token selected) to see and hand out what's inside. Add quest and lore items in the Library.</p>
-            <h3>Random encounters</h3>
-            <label>
-              Check each new round
-              <select value={encounterChance} onChange={(e) => setEncounterChance(Number(e.target.value))}>
-                <option value={0}>Off</option>
-                <option value={1 / 6}>1 in 6</option>
-                <option value={1 / 4}>1 in 4</option>
-                <option value={1 / 2}>1 in 2</option>
-              </select>
-            </label>
-            <button type="button" onClick={() => rollNow()} disabled={!fogOn}>
-              Roll encounter now
-            </button>
-            <p className="fine">Monsters are placed in a room the party hasn't seen, and stay hidden in Player view until someone can see them. Placeholder creatures for now.</p>
-          </section>
+          {!playerView && (
+            <section className="play-controls" aria-label="DM settings">
+              <details className="panel-group">
+                <summary>Exploration</summary>
+                <label title="How far the party can see. Fog lifts within this range.">
+                  Party sight
+                  <select value={sightFt} onChange={(e) => setSightFt(Number(e.target.value))}>
+                    {[30, 60, 90, 120, 240].map((ft) => (
+                      <option key={ft} value={ft}>
+                        {ft} ft
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label className="check" title="Closed doors swing open when a token walks through them. Locked doors still block.">
+                  <input type="checkbox" checked={autoDoors} onChange={(e) => setAutoDoors(e.target.checked)} /> Open doors when walking through
+                </label>
+                <label className="check" title="Between rounds, creatures the party can't see may move. Guards stay near home.">
+                  <input type="checkbox" checked={wandering} onChange={(e) => setWandering(e.target.checked)} /> Unseen monsters wander
+                </label>
+                <div className="row">
+                  <button type="button" onClick={revealAll} disabled={!fogOn} title="Mark the whole map as explored">
+                    Reveal map
+                  </button>
+                  <button type="button" onClick={reshroud} disabled={!fogOn} title="Forget everything explored">
+                    Re-shroud
+                  </button>
+                </div>
+              </details>
+              <details className="panel-group">
+                <summary>Loot</summary>
+                <label title="Sets how much treasure chests and creatures carry (tiers 1–4)">
+                  Party level
+                  <select value={partyLevel} onChange={(e) => setPartyLevel(Number(e.target.value))}>
+                    {Array.from({ length: 20 }, (_, i) => i + 1).map((l) => (
+                      <option key={l} value={l}>
+                        Level {l} (tier {tierForLevel(l)})
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <button type="button" onClick={restock} title="Restock every chest on this map. Click a chest (nothing selected) to see inside.">
+                  Reroll this map's loot ({lootObjects.length} chests)
+                </button>
+              </details>
+              <details className="panel-group">
+                <summary>Random encounters</summary>
+                <label title="Chance of an encounter each new round. Monsters appear in a room the party hasn't seen.">
+                  Check each round
+                  <select value={encounterChance} onChange={(e) => setEncounterChance(Number(e.target.value))}>
+                    <option value={0}>Off</option>
+                    <option value={1 / 6}>1 in 6</option>
+                    <option value={1 / 4}>1 in 4</option>
+                    <option value={1 / 2}>1 in 2</option>
+                  </select>
+                </label>
+                <button type="button" onClick={() => rollNow()} disabled={!fogOn} title="Place an encounter now, out of the party's sight">
+                  Roll encounter now
+                </button>
+              </details>
+            </section>
+          )}
         </TokenPanel>
       </div>
+      {newMapOpen && (
+        <NewMapDialog
+          seed={seed}
+          size={size}
+          kind={kind}
+          onSeed={setSeed}
+          onSize={setSize}
+          onKind={setKind}
+          replaceBlocked={map.parent ? 'This place was made from the map around it. Replace that map instead.' : undefined}
+          onAdd={() => newMap(false)}
+          onReplace={() => newMap(true)}
+          onClose={() => setNewMapOpen(false)}
+        />
+      )}
+      {helpOpen && (
+        <HelpDialog
+          onClose={() => {
+            setHelpOpen(false);
+            try {
+              localStorage.setItem('dmg.seenHelp.v1', '1');
+            } catch {
+              // ignore
+            }
+          }}
+        />
+      )}
       {libraryOpen && <LibraryDialog lib={lib} onClose={() => setLibraryOpen(false)} />}
       {peopleOpen && (
         <PeopleDialog
