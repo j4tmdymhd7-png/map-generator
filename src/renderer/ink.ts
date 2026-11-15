@@ -10,7 +10,7 @@
  * symbol, never by hue.
  */
 import { idx, isDifficult, terrainAt } from '../core/model/grid';
-import type { DoorState, DungeonMap, FurnitureObject, LootObject, MapStyle, RoomObject, Terrain } from '../core/model/types';
+import type { DoorState, DungeonMap, FurnitureObject, LootObject, MapStyle, RoomObject, StructureObject, Terrain } from '../core/model/types';
 import { doorOrientation, isOpenAt, rockDistance, wallSegments, type Segment } from './geometry';
 
 export const INK = {
@@ -75,6 +75,9 @@ interface Pre {
   doors: Map<number, DoorState>;
   furnitureCells: Set<number>;
   furniture: FurnitureObject[];
+  structures: StructureObject[];
+  /** Squares covered by a drawn structure (no generic rock hatching there). */
+  structureCells: Set<number>;
   loot: LootObject[];
   rooms: RoomObject[];
 }
@@ -117,6 +120,11 @@ function pre(map: DungeonMap): Pre {
   const furnitureCells = new Set<number>();
   for (const f of furniture)
     for (let y = f.rect.y; y < f.rect.y + f.rect.h; y++) for (let x = f.rect.x; x < f.rect.x + f.rect.w; x++) furnitureCells.add(idx(map, x, y));
+  const structures = map.objects.filter((o): o is StructureObject => o.kind === 'structure');
+  const structureCells = new Set<number>();
+  for (const st of structures)
+    for (let y = st.rect.y; y < st.rect.y + st.rect.h; y++)
+      for (let x = st.rect.x; x < st.rect.x + st.rect.w; x++) if (x >= 0 && y >= 0 && x < map.width && y < map.height) structureCells.add(idx(map, x, y));
   const doors = new Map<number, DoorState>();
   for (const o of map.objects) if (o.kind === 'door') doors.set(idx(map, o.at.x, o.at.y), o.state);
   const style = map.style ?? 'dungeon';
@@ -130,6 +138,8 @@ function pre(map: DungeonMap): Pre {
     doors,
     furnitureCells,
     furniture,
+    structures,
+    structureCells,
     loot: map.objects.filter((o): o is LootObject => o.kind === 'loot'),
     rooms: map.objects.filter((o): o is RoomObject => o.kind === 'room' && o.visibility === 'public'),
   };
@@ -193,7 +203,7 @@ function drawHatching(ctx: Ctx, map: DungeonMap, p: Pre, c: number, r: Region) {
   ctx.lineCap = 'round';
   forCells(map, r, 1, (x, y, i) => {
     const d = p.rockDist[i];
-    if (d === 0) return;
+    if (d === 0 || p.structureCells.has(i)) return;
     const rng = rngAt(p.seed, SALT.hatch, x, y);
     if (rng() > keep[Math.min(d, 4)]) return;
     const angle = rng() * Math.PI;
@@ -762,6 +772,156 @@ function drawLoot(ctx: Ctx, loot: LootObject, c: number) {
 }
 
 
+const ROOF = '#e4d8bb';
+const STONE = '#cbbd9c';
+
+/** A hip roof seen from above: ridge along the long side, hips to the corners, shading on two slopes. */
+function drawRoof(ctx: Ctx, rect: { x: number; y: number; w: number; h: number }, c: number) {
+  const x0 = rect.x * c,
+    y0 = rect.y * c,
+    w = rect.w * c,
+    h = rect.h * c;
+  ctx.fillStyle = ROOF;
+  ctx.fillRect(x0, y0, w, h);
+  const horizontal = w >= h;
+  const half = (horizontal ? h : w) / 2;
+  // Ridge end points
+  const r1 = horizontal ? { x: x0 + half, y: y0 + half } : { x: x0 + half, y: y0 + half };
+  const r2 = horizontal ? { x: x0 + w - half, y: y0 + half } : { x: x0 + half, y: y0 + h - half };
+  // Shade the two "south/east" slopes with fine parallel lines.
+  ctx.save();
+  ctx.beginPath();
+  if (horizontal) {
+    ctx.moveTo(x0, y0 + h);
+    ctx.lineTo(r1.x, r1.y);
+    ctx.lineTo(r2.x, r2.y);
+    ctx.lineTo(x0 + w, y0 + h);
+    ctx.closePath();
+    ctx.moveTo(x0 + w, y0);
+    ctx.lineTo(r2.x, r2.y);
+    ctx.lineTo(x0 + w, y0 + h);
+    ctx.closePath();
+  } else {
+    ctx.moveTo(x0 + w, y0);
+    ctx.lineTo(r1.x, r1.y);
+    ctx.lineTo(r2.x, r2.y);
+    ctx.lineTo(x0 + w, y0 + h);
+    ctx.closePath();
+    ctx.moveTo(x0, y0 + h);
+    ctx.lineTo(r2.x, r2.y);
+    ctx.lineTo(x0 + w, y0 + h);
+    ctx.closePath();
+  }
+  ctx.clip();
+  ctx.strokeStyle = 'rgba(42, 36, 31, 0.45)';
+  ctx.lineWidth = Math.max(0.5, c * 0.025);
+  ctx.beginPath();
+  const step = c * 0.22;
+  if (horizontal)
+    for (let yy = y0 + step / 2; yy < y0 + h; yy += step) {
+      ctx.moveTo(x0, yy);
+      ctx.lineTo(x0 + w, yy);
+    }
+  else
+    for (let xx = x0 + step / 2; xx < x0 + w; xx += step) {
+      ctx.moveTo(xx, y0);
+      ctx.lineTo(xx, y0 + h);
+    }
+  ctx.stroke();
+  ctx.restore();
+  // Ridge and hips
+  ctx.strokeStyle = INK.ink;
+  ctx.lineWidth = Math.max(0.7, c * 0.04);
+  ctx.beginPath();
+  ctx.moveTo(r1.x, r1.y);
+  ctx.lineTo(r2.x, r2.y);
+  ctx.moveTo(x0, y0);
+  ctx.lineTo(r1.x, r1.y);
+  ctx.lineTo(horizontal ? x0 : x0 + w, horizontal ? y0 + h : y0);
+  ctx.moveTo(x0 + w, y0 + h);
+  ctx.lineTo(r2.x, r2.y);
+  ctx.lineTo(horizontal ? x0 + w : x0, horizontal ? y0 : y0 + h);
+  ctx.stroke();
+  // Own outline, so neighbouring houses stay distinct.
+  ctx.lineWidth = Math.max(0.8, c * 0.05);
+  ctx.strokeRect(x0, y0, w, h);
+}
+
+/** City wall: dressed stone, coursed along its length. */
+function drawWallStones(ctx: Ctx, map: DungeonMap, st: StructureObject, c: number, r: Region) {
+  const horizontal = st.rect.w >= st.rect.h;
+  for (let y = Math.max(st.rect.y, r.y0 - 1); y < Math.min(st.rect.y + st.rect.h, r.y1 + 1); y++)
+    for (let x = Math.max(st.rect.x, r.x0 - 1); x < Math.min(st.rect.x + st.rect.w, r.x1 + 1); x++) {
+      if (terrainAt(map, x, y) !== 'wall') continue;
+      ctx.fillStyle = STONE;
+      ctx.fillRect(x * c, y * c, c, c);
+      ctx.strokeStyle = 'rgba(42, 36, 31, 0.5)';
+      ctx.lineWidth = Math.max(0.5, c * 0.03);
+      ctx.beginPath();
+      // Courses
+      if (horizontal) {
+        ctx.moveTo(x * c, (y + 0.5) * c);
+        ctx.lineTo((x + 1) * c, (y + 0.5) * c);
+        const off = (x + y) % 2 ? 0.25 : 0.75;
+        ctx.moveTo((x + off) * c, y * c);
+        ctx.lineTo((x + off) * c, (y + 0.5) * c);
+        ctx.moveTo((x + 1 - off) * c, (y + 0.5) * c);
+        ctx.lineTo((x + 1 - off) * c, (y + 1) * c);
+      } else {
+        ctx.moveTo((x + 0.5) * c, y * c);
+        ctx.lineTo((x + 0.5) * c, (y + 1) * c);
+        const off = (x + y) % 2 ? 0.25 : 0.75;
+        ctx.moveTo(x * c, (y + off) * c);
+        ctx.lineTo((x + 0.5) * c, (y + off) * c);
+        ctx.moveTo((x + 0.5) * c, (y + 1 - off) * c);
+        ctx.lineTo((x + 1) * c, (y + 1 - off) * c);
+      }
+      ctx.stroke();
+    }
+}
+
+/** A square tower: heavy stone with a walled walk around a central roof. */
+function drawTower(ctx: Ctx, st: StructureObject, c: number) {
+  const { x, y, w, h } = st.rect;
+  ctx.fillStyle = STONE;
+  ctx.fillRect(x * c, y * c, w * c, h * c);
+  ctx.strokeStyle = INK.ink;
+  ctx.lineWidth = Math.max(1.2, c * 0.1);
+  ctx.strokeRect(x * c, y * c, w * c, h * c);
+  // Battlements: notches along the edge
+  ctx.fillStyle = INK.ink;
+  const n = w * 2;
+  for (let k = 0; k < n; k += 2) {
+    const s = c * 0.22;
+    ctx.fillRect((x + (k + 0.5) / 2) * c - s / 2, y * c, s, s);
+    ctx.fillRect((x + (k + 0.5) / 2) * c - s / 2, (y + h) * c - s, s, s);
+    ctx.fillRect(x * c, (y + (k + 0.5) / 2) * c - s / 2, s, s);
+    ctx.fillRect((x + w) * c - s, (y + (k + 0.5) / 2) * c - s / 2, s, s);
+  }
+  ctx.lineWidth = Math.max(0.8, c * 0.05);
+  ctx.strokeRect((x + 0.6) * c, (y + 0.6) * c, (w - 1.2) * c, (h - 1.2) * c);
+  ctx.fillStyle = ROOF;
+  ctx.fillRect((x + 1) * c, (y + 1) * c, (w - 2) * c, (h - 2) * c);
+  ctx.beginPath();
+  ctx.moveTo((x + 1) * c, (y + 1) * c);
+  ctx.lineTo((x + w - 1) * c, (y + h - 1) * c);
+  ctx.moveTo((x + w - 1) * c, (y + 1) * c);
+  ctx.lineTo((x + 1) * c, (y + h - 1) * c);
+  ctx.strokeRect((x + 1) * c, (y + 1) * c, (w - 2) * c, (h - 2) * c);
+  ctx.stroke();
+}
+
+function drawStructures(ctx: Ctx, map: DungeonMap, p: Pre, c: number, r: Region) {
+  const near = (st: StructureObject) => st.rect.x < r.x1 + 1 && st.rect.x + st.rect.w > r.x0 - 1 && st.rect.y < r.y1 + 1 && st.rect.y + st.rect.h > r.y0 - 1;
+  for (const st of p.structures) if (st.type === 'building' && near(st)) drawRoof(ctx, st.rect, c);
+  for (const st of p.structures) if (st.type === 'wall' && near(st)) drawWallStones(ctx, map, st, c, r);
+}
+
+function drawTowers(ctx: Ctx, p: Pre, c: number, r: Region) {
+  for (const st of p.structures)
+    if (st.type === 'tower' && st.rect.x < r.x1 + 1 && st.rect.x + st.rect.w > r.x0 - 1 && st.rect.y < r.y1 + 1 && st.rect.y + st.rect.h > r.y0 - 1) drawTower(ctx, st, c);
+}
+
 function drawFeatures(ctx: Ctx, map: DungeonMap, p: Pre, c: number, r: Region) {
   // Ground-level texture first (it can spill a little into neighbouring squares).
   forCells(map, r, 1, (x, y, i) => {
@@ -842,8 +1002,10 @@ export function drawInkRegion(ctx: Ctx, map: DungeonMap, opts: InkOptions, r: Re
   drawHatching(ctx, map, p, c, r);
   drawFloor(ctx, map, p, c, r, opts.grid);
   drawRoadEdges(ctx, p, c, r);
+  drawStructures(ctx, map, p, c, r);
   drawFeatures(ctx, map, p, c, r);
   drawWalls(ctx, p, c, r);
+  drawTowers(ctx, p, c, r);
   drawTrees(ctx, map, p, c, r);
   if (opts.roomNumbers) drawRoomNumbers(ctx, map, p, c, r);
   ctx.restore();

@@ -128,7 +128,14 @@ export interface FurnitureObject extends BaseObject {
   type: FurnitureType;
 }
 
-export type MapObject = RoomObject | CorridorObject | DoorObject | StairsObject | NoteObject | LootObject | FurnitureObject;
+/** A drawn structure over 'wall' squares: a house, a stretch of city wall, or a tower. */
+export interface StructureObject extends BaseObject {
+  kind: 'structure';
+  rect: Rect;
+  type: 'building' | 'wall' | 'tower';
+}
+
+export type MapObject = RoomObject | CorridorObject | DoorObject | StairsObject | NoteObject | LootObject | FurnitureObject | StructureObject;
 
 /** How a map is drawn: rock-and-corridor dungeon, building interior, or outdoors. */
 export type MapStyle = 'dungeon' | 'interior' | 'outdoor';

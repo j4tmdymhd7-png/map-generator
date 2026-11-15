@@ -7,12 +7,12 @@
  * is the "lair".
  */
 import { createEmptyMap, idx, ORTHOGONAL, rectCenter } from '../model/grid';
-import type { DungeonMap, FurnitureObject, FurnitureType, Point, Rect, RoomObject, Terrain } from '../model/types';
+import type { DoorObject, DungeonMap, FurnitureObject, FurnitureType, Point, Rect, RoomObject, StructureObject, Terrain } from '../model/types';
 import { createRng, type Rng } from '../rng';
 import type { GenerateResult } from './generate';
 import { validateDungeon } from './validate';
 
-export const OUTDOOR_VERSION = 1;
+export const OUTDOOR_VERSION = 2;
 export type OutdoorScale = 'huge' | 'gargantuan';
 const DIM: Record<OutdoorScale, number> = { huge: 120, gargantuan: 200 };
 
@@ -321,8 +321,26 @@ export function generateForest(seed: string, scale: OutdoorScale): GenerateResul
 
 // ---------------------------------------------------------------------------
 // Town / city
+//
+// Layout follows how real towns are built:
+// - a grid of streets (one avenue each way, 3 wide; streets 2 wide) whose
+//   spacing varies; now and then a street segment is left out, so two blocks
+//   merge into one longer block;
+// - every block is lined with rectangular buildings fronting its streets
+//   (row houses and shops of varied widths and depths), with an open courtyard
+//   behind them reached by narrow alleys; some alleys end at a back house;
+// - squares near the crossroads with wells and market stalls;
+// - cities add a wall: a ring road inside it so houses never touch it, square
+//   towers at the corners and along each side, and gatehouses (gates are doors
+//   that can be closed or locked) where the avenues leave the city.
 
 const PLAZA_NAMES = ['Market square', 'Temple square', 'Guild square', 'Fountain court', 'Old square', 'Moot hall green'];
+const GATE_NAMES = { n: 'North gate', s: 'South gate', w: 'West gate', e: 'East gate' } as const;
+
+interface Line {
+  pos: number;
+  w: number;
+}
 
 export function generateTown(seed: string, scale: OutdoorScale): GenerateResult {
   const W = DIM[scale],
@@ -332,127 +350,219 @@ export function generateTown(seed: string, scale: OutdoorScale): GenerateResult 
   const map = createEmptyMap({ id: `map-${scale}-${kind}-${seed}`, title: `${scale === 'huge' ? 'Town' : 'City'} ${seed}`, width: W, height: H, fill: 'ground' });
   map.style = 'outdoor';
   map.generation = { seed, generatorVersion: OUTDOOR_VERSION, params: { kind, scale } };
+  const inMap = (x: number, y: number) => x >= 0 && y >= 0 && x < W && y < H;
+  const get = (x: number, y: number) => (inMap(x, y) ? map.terrain[idx(map, x, y)] : 'void');
   const set = (x: number, y: number, t: Terrain) => {
-    if (x >= 0 && y >= 0 && x < W && y < H) map.terrain[idx(map, x, y)] = t;
+    if (inMap(x, y)) map.terrain[idx(map, x, y)] = t;
   };
 
   const walled = scale === 'gargantuan';
-  const inset = walled ? 12 : 5;
-  const town: Rect = { x: inset, y: inset, w: W - inset * 2, h: H - inset * 2 };
+  const margin = walled ? 16 : 6;
+  const T: Rect = { x: margin, y: margin, w: W - 2 * margin, h: H - 2 * margin };
+  const inT = (x: number, y: number) => x >= T.x && y >= T.y && x < T.x + T.w && y < T.y + T.h;
 
-  // Outskirts: scattered trees and brush
+  // Countryside: trees and brush outside the town.
   const n = makeNoise(rng, W, H, 9);
   for (let y = 0; y < H; y++)
     for (let x = 0; x < W; x++) {
-      const inTown = x >= town.x && y >= town.y && x < town.x + town.w && y < town.y + town.h;
-      if (inTown) continue;
+      if (x >= T.x - 6 && y >= T.y - 6 && x < T.x + T.w + 6 && y < T.y + T.h + 6) continue;
       const d = n(x, y);
       if (d > 0.62) set(x, y, rng.chance(0.6) ? 'tree' : 'brush');
       else if (d > 0.52 && rng.chance(0.3)) set(x, y, 'brush');
     }
 
-  // City wall (gargantuan): two squares thick; gates appear where avenues cut through.
-  if (walled) {
-    for (let y = town.y - 2; y < town.y + town.h + 2; y++)
-      for (let x = town.x - 2; x < town.x + town.w + 2; x++) {
-        const ring = x < town.x || y < town.y || x >= town.x + town.w || y >= town.y + town.h;
-        if (ring) set(x, y, 'wall');
-      }
-  }
+  // River first, so streets crossing it become bridges.
+  const hasRiver = walled || rng.chance(0.4);
+  if (hasRiver) carveRiver(map, rng, false, rng.chance(0.5) ? Math.floor(H * 0.3) : Math.floor(H * 0.7), walled ? 6 : 4, walled ? 4 : 2);
+  const isWater = (x: number, y: number) => get(x, y) === 'water' || get(x, y) === 'deepwater';
 
-  // River (always in a city, sometimes in a town)
-  const riverY = rng.chance(0.5) ? Math.floor(H * 0.3) : Math.floor(H * 0.7);
-  if (walled || rng.chance(0.4)) carveRiver(map, rng, false, riverY, walled ? 6 : 4, walled ? 4 : 2);
-
-  // Avenues (3 wide, edge to edge) and streets (2 wide, inside the town)
-  const ax = Math.floor(W / 2) + rng.int(-Math.floor(W / 10), Math.floor(W / 10));
-  const ay = Math.floor(H / 2) + rng.int(-Math.floor(H / 10), Math.floor(H / 10));
-  for (let k = 0; k < W; k++)
-    for (let o = -1; o <= 1; o++) {
-      set(ax + o, k, 'road');
-      set(k, ay + o, 'road');
-    }
-  const streets = (start: number, end: number, avenue: number) => {
-    const out: number[] = [];
-    for (let p = start + rng.int(6, 10); p < end - 6; p += rng.int(11, 16)) if (Math.abs(p - avenue) > 5) out.push(p);
+  // Street lines: the first and last run along the town's edge (inside a city wall, that's the ring road).
+  const lines = (start: number, len: number): Line[] => {
+    const out: Line[] = [{ pos: start, w: 2 }];
+    for (let p = start + rng.int(13, 18); p < start + len - 2 - 9; p += rng.int(13, 18)) out.push({ pos: p, w: 2 });
+    out.push({ pos: start + len - 2, w: 2 });
     return out;
   };
-  for (const sx of streets(town.x, town.x + town.w, ax)) {
-    const from = town.y + (rng.chance(0.3) ? rng.int(0, Math.floor(town.h / 2)) : 0);
-    const to = town.y + town.h - 1 - (rng.chance(0.3) ? rng.int(0, Math.floor(town.h / 2)) : 0);
-    for (let y = from; y <= to; y++) {
-      set(sx, y, 'road');
-      set(sx + 1, y, 'road');
-    }
+  const xs = lines(T.x, T.w),
+    ys = lines(T.y, T.h);
+  const avenue = (ls: Line[], mid: number) => {
+    let best = 1;
+    for (let i = 1; i < ls.length - 1; i++) if (Math.abs(ls[i].pos - mid) < Math.abs(ls[best].pos - mid)) best = i;
+    ls[best].w = 3;
+    return best;
+  };
+  const ai = avenue(xs, W / 2),
+    aj = avenue(ys, H / 2);
+  const nbx = xs.length - 1,
+    nby = ys.length - 1;
+  const col = (i: number) => ({ a: xs[i].pos + xs[i].w, b: xs[i + 1].pos - 1 }); // inclusive x range of block column i
+  const row = (j: number) => ({ a: ys[j].pos + ys[j].w, b: ys[j + 1].pos - 1 });
+
+  // Leave out some street segments so pairs of blocks merge.
+  const vOmit = new Set<string>(),
+    hOmit = new Set<string>();
+  const merged = new Int32Array(nbx * nby).fill(-1);
+  const bid = (i: number, j: number) => j * nbx + i;
+  for (let i = 1; i < nbx; i++) {
+    if (i === ai) continue;
+    for (let j = 0; j < nby; j++)
+      if (merged[bid(i - 1, j)] < 0 && merged[bid(i, j)] < 0 && rng.chance(0.14)) {
+        vOmit.add(`${i}:${j}`);
+        merged[bid(i - 1, j)] = bid(i, j);
+        merged[bid(i, j)] = bid(i - 1, j);
+      }
   }
-  for (const sy of streets(town.y, town.y + town.h, ay)) {
-    const from = town.x + (rng.chance(0.3) ? rng.int(0, Math.floor(town.w / 2)) : 0);
-    const to = town.x + town.w - 1 - (rng.chance(0.3) ? rng.int(0, Math.floor(town.w / 2)) : 0);
-    for (let x = from; x <= to; x++) {
-      set(x, sy, 'road');
-      set(x, sy + 1, 'road');
+  for (let j = 1; j < nby; j++) {
+    if (j === aj) continue;
+    for (let i = 0; i < nbx; i++)
+      if (merged[bid(i, j - 1)] < 0 && merged[bid(i, j)] < 0 && rng.chance(0.14)) {
+        hOmit.add(`${j}:${i}`);
+        merged[bid(i, j - 1)] = bid(i, j);
+        merged[bid(i, j)] = bid(i, j - 1);
+      }
+  }
+  // Carve streets
+  for (let i = 0; i < xs.length; i++)
+    for (let j = 0; j < ys.length; j++) {
+      for (let x = xs[i].pos; x < xs[i].pos + xs[i].w; x++) for (let y = ys[j].pos; y < ys[j].pos + ys[j].w; y++) set(x, y, 'road'); // crossing
+      if (j < nby && !vOmit.has(`${i}:${j}`)) {
+        const r = row(j);
+        for (let x = xs[i].pos; x < xs[i].pos + xs[i].w; x++) for (let y = r.a; y <= r.b; y++) set(x, y, 'road');
+      }
+      if (i < nbx && !hOmit.has(`${j}:${i}`)) {
+        const c = col(i);
+        for (let y = ys[j].pos; y < ys[j].pos + ys[j].w; y++) for (let x = c.a; x <= c.b; x++) set(x, y, 'road');
+      }
+    }
+  // Avenues run on out of town to the map edges.
+  for (let k = 0; k < W; k++)
+    for (let o = 0; o < 3; o++) {
+      if (!inT(xs[ai].pos + o, k)) set(xs[ai].pos + o, k, 'road');
+      if (!inT(k, ys[aj].pos + o)) set(k, ys[aj].pos + o, 'road');
+    }
+
+  const structures: StructureObject[] = [];
+  let sn = 0;
+  const addStructure = (type: StructureObject['type'], rect: Rect, label?: string) =>
+    structures.push({ id: `struct-${++sn}`, kind: 'structure', type, rect, label, visibility: 'public' });
+
+  // City wall, towers and gatehouses
+  const doors: DoorObject[] = [];
+  if (walled) {
+    const wx0 = T.x - 2,
+      wy0 = T.y - 2,
+      wx1 = T.x + T.w + 1,
+      wy1 = T.y + T.h + 1; // outer bounds of the 2-thick ring
+    const wallCell = (x: number, y: number) => {
+      if (isWater(x, y)) return; // the river passes under the wall
+      if (get(x, y) === 'road') return; // gates are cut later
+      set(x, y, 'wall');
+    };
+    for (let x = wx0; x <= wx1; x++)
+      for (const y of [wy0, wy0 + 1, wy1 - 1, wy1]) {
+        if (get(x, y) === 'road') continue;
+        wallCell(x, y);
+      }
+    for (let y = wy0; y <= wy1; y++)
+      for (const x of [wx0, wx0 + 1, wx1 - 1, wx1]) {
+        if (get(x, y) === 'road') continue;
+        wallCell(x, y);
+      }
+    addStructure('wall', { x: wx0, y: wy0, w: wx1 - wx0 + 1, h: 2 });
+    addStructure('wall', { x: wx0, y: wy1 - 1, w: wx1 - wx0 + 1, h: 2 });
+    addStructure('wall', { x: wx0, y: wy0, w: 2, h: wy1 - wy0 + 1 });
+    addStructure('wall', { x: wx1 - 1, y: wy0, w: 2, h: wy1 - wy0 + 1 });
+
+    const tower = (x: number, y: number, label?: string) => {
+      const r = { x, y, w: 4, h: 4 };
+      for (let yy = y; yy < y + 4; yy++) for (let xx = x; xx < x + 4; xx++) if (!isWater(xx, yy) && !inT(xx, yy)) set(xx, yy, 'wall');
+      addStructure('tower', r, label);
+    };
+    // Corners (sticking out of the wall)
+    tower(wx0 - 2, wy0 - 2);
+    tower(wx1 - 1, wy0 - 2);
+    tower(wx0 - 2, wy1 - 1);
+    tower(wx1 - 1, wy1 - 1);
+    // Gates: where each avenue crosses the wall. Outer course is the gate (doors), inner course a passage.
+    const gx = xs[ai].pos,
+      gy = ys[aj].pos;
+    const gate = (cells: Point[], label: string) => {
+      cells.forEach((p, k) => {
+        set(p.x, p.y, 'door');
+        doors.push({ id: `gate-${label}-${k}`, kind: 'door', at: p, state: 'open', label, visibility: 'public' });
+      });
+    };
+    gate([0, 1, 2].map((o) => ({ x: gx + o, y: wy0 })), GATE_NAMES.n);
+    gate([0, 1, 2].map((o) => ({ x: gx + o, y: wy1 })), GATE_NAMES.s);
+    gate([0, 1, 2].map((o) => ({ x: wx0, y: gy + o })), GATE_NAMES.w);
+    gate([0, 1, 2].map((o) => ({ x: wx1, y: gy + o })), GATE_NAMES.e);
+    // Gatehouse towers flank each gate.
+    tower(gx - 4, wy0 - 2, GATE_NAMES.n);
+    tower(gx + 3, wy0 - 2, GATE_NAMES.n);
+    tower(gx - 4, wy1 - 1, GATE_NAMES.s);
+    tower(gx + 3, wy1 - 1, GATE_NAMES.s);
+    tower(wx0 - 2, gy - 4, GATE_NAMES.w);
+    tower(wx0 - 2, gy + 3, GATE_NAMES.w);
+    tower(wx1 - 1, gy - 4, GATE_NAMES.e);
+    tower(wx1 - 1, gy + 3, GATE_NAMES.e);
+    // Towers along each side, clear of gates and corners
+    for (let p = wx0 + 14; p < wx1 - 14; p += rng.int(14, 18)) {
+      if (Math.abs(p - gx) < 10) continue;
+      tower(p - 1, wy0 - 2);
+      tower(p - 1, wy1 - 1);
+    }
+    for (let p = wy0 + 14; p < wy1 - 14; p += rng.int(14, 18)) {
+      if (Math.abs(p - gy) < 10) continue;
+      tower(wx0 - 2, p - 1);
+      tower(wx1 - 1, p - 1);
     }
   }
 
-  // Blocks: connected patches of ground inside the town.
-  const blockOf = new Int32Array(W * H).fill(-1);
-  const blocks: number[][] = [];
-  for (let y = town.y; y < town.y + town.h; y++)
-    for (let x = town.x; x < town.x + town.w; x++) {
-      const i = idx(map, x, y);
-      if (blockOf[i] >= 0 || map.terrain[i] !== 'ground') continue;
-      const cells = [i];
-      blockOf[i] = blocks.length;
-      for (let h = 0; h < cells.length; h++) {
-        const c = cells[h];
-        const cx = c % W,
-          cy = (c - cx) / W;
-        for (const d of ORTHOGONAL) {
-          const nx = cx + d.x,
-            ny = cy + d.y;
-          if (nx < town.x || ny < town.y || nx >= town.x + town.w || ny >= town.y + town.h) continue;
-          const ni = idx(map, nx, ny);
-          if (blockOf[ni] < 0 && map.terrain[ni] === 'ground') {
-            blockOf[ni] = blocks.length;
-            cells.push(ni);
-          }
-        }
+  // Blocks: each block, or merged pair, as a rectangle.
+  const blocks: Rect[] = [];
+  const done = new Uint8Array(nbx * nby);
+  for (let j = 0; j < nby; j++)
+    for (let i = 0; i < nbx; i++) {
+      if (done[bid(i, j)]) continue;
+      done[bid(i, j)] = 1;
+      let r: Rect = { x: col(i).a, y: row(j).a, w: col(i).b - col(i).a + 1, h: row(j).b - row(j).a + 1 };
+      const m = merged[bid(i, j)];
+      if (m >= 0) {
+        done[m] = 1;
+        const mi = m % nbx,
+          mj = (m - mi) / nbx;
+        const o: Rect = { x: col(mi).a, y: row(mj).a, w: col(mi).b - col(mi).a + 1, h: row(mj).b - row(mj).a + 1 };
+        const x0 = Math.min(r.x, o.x),
+          y0 = Math.min(r.y, o.y);
+        r = { x: x0, y: y0, w: Math.max(r.x + r.w, o.x + o.w) - x0, h: Math.max(r.y + r.h, o.y + o.h) - y0 };
       }
-      blocks.push(cells);
+      if (r.w >= 3 && r.h >= 3) blocks.push(r);
     }
-  const bounds = (cells: number[]): Rect => {
-    let x0 = W,
-      y0 = H,
-      x1 = 0,
-      y1 = 0;
-    for (const c of cells) {
-      const x = c % W,
-        y = (c - x) / W;
-      x0 = Math.min(x0, x);
-      y0 = Math.min(y0, y);
-      x1 = Math.max(x1, x);
-      y1 = Math.max(y1, y);
-    }
-    return { x: x0, y: y0, w: x1 - x0 + 1, h: y1 - y0 + 1 };
-  };
 
   const props = new Props();
   const rooms: RoomObject[] = [];
-  // Plazas: the blocks nearest the crossroads (and a few more in a city).
-  const center = { x: ax, y: ay };
-  const big = blocks.map((cells, k) => ({ k, cells, r: bounds(cells) })).filter((b) => b.cells.length >= 30 && b.r.w >= 6 && b.r.h >= 6);
-  big.sort((a, b) => Math.hypot(rectCenter(a.r).x - center.x, rectCenter(a.r).y - center.y) - Math.hypot(rectCenter(b.r).x - center.x, rectCenter(b.r).y - center.y));
-  const plazaCount = walled ? 5 : 2;
-  const plazas = new Set<number>();
-  for (let p = 0; p < big.length && plazas.size < plazaCount; p += plazas.size === 0 ? 1 : rng.int(1, 3)) plazas.add(big[p].k);
+
+  // Squares: the blocks nearest the crossroads.
+  const cross = { x: xs[ai].pos + 1, y: ys[aj].pos + 1 };
+  const byCentre = [...blocks].sort((a, b) => {
+    const ca = rectCenter(a),
+      cb = rectCenter(b);
+    return Math.hypot(ca.x - cross.x, ca.y - cross.y) - Math.hypot(cb.x - cross.x, cb.y - cross.y);
+  });
+  const plazaCount = walled ? 4 : 2;
+  const plazas = new Set<Rect>();
+  const dry = (r: Rect) => {
+    for (let y = r.y; y < r.y + r.h; y++) for (let x = r.x; x < r.x + r.w; x++) if (isWater(x, y)) return false;
+    return true;
+  };
+  for (let k = 0; k < byCentre.length && plazas.size < plazaCount; k += plazas.size === 0 ? 1 : rng.int(2, 4))
+    if (byCentre[k].w >= 7 && byCentre[k].h >= 7 && dry(byCentre[k])) plazas.add(byCentre[k]);
   let plazaN = 0;
-  for (const k of plazas) {
-    const cells = blocks[k];
-    const r = bounds(cells);
-    for (const c of cells) map.terrain[c] = 'road';
+  for (const r of plazas) {
+    for (let y = r.y; y < r.y + r.h; y++) for (let x = r.x; x < r.x + r.w; x++) if (get(x, y) === 'ground') set(x, y, 'road');
     const c = rectCenter(r);
     const name = PLAZA_NAMES[plazaN++ % PLAZA_NAMES.length];
-    if (map.terrain[idx(map, c.x + 1, c.y + 1)] === 'road') {
+    if (get(c.x + 1, c.y + 1) === 'road') {
       set(c.x + 1, c.y + 1, 'furniture');
       props.add('well', { x: c.x + 1, y: c.y + 1, w: 1, h: 1 }, 'Well');
     }
@@ -460,7 +570,7 @@ export function generateTown(seed: string, scale: OutdoorScale): GenerateResult 
       for (let y = r.y + 2; y < r.y + r.h - 2; y += 3)
         for (let x = r.x + 2; x + 1 < r.x + r.w - 2; x += 4) {
           if (Math.abs(x - c.x) <= 2 && Math.abs(y - c.y) <= 2) continue;
-          if (map.terrain[idx(map, x, y)] === 'road' && map.terrain[idx(map, x + 1, y)] === 'road') {
+          if (get(x, y) === 'road' && get(x + 1, y) === 'road') {
             set(x, y, 'furniture');
             set(x + 1, y, 'furniture');
             props.add('stall', { x, y, w: 2, h: 1 }, 'Market stall');
@@ -469,65 +579,101 @@ export function generateTown(seed: string, scale: OutdoorScale): GenerateResult 
     rooms.push({ id: `plaza-${plazaN}`, kind: 'room', rect: r, label: name, visibility: 'public' });
   }
 
-  // Everything else: split into lots; most become buildings, some yards.
-  let yardN = 0;
-  blocks.forEach((cells, k) => {
-    if (plazas.has(k)) return;
-    const inBlock = new Set(cells);
-    const lots: Rect[] = [];
-    const split = (r: Rect) => {
-      const maxSide = rng.int(6, 9);
-      if (r.w <= maxSide && r.h <= maxSide) {
-        lots.push(r);
-        return;
+  // Buildings
+  const building = (r: Rect) => {
+    if (r.w < 2 || r.h < 2) return;
+    for (let y = r.y; y < r.y + r.h; y++) for (let x = r.x; x < r.x + r.w; x++) if (get(x, y) !== 'ground') return; // never over water or roads
+    for (let y = r.y; y < r.y + r.h; y++) for (let x = r.x; x < r.x + r.w; x++) set(x, y, 'wall');
+    addStructure('building', r);
+  };
+  /** Cut a strip into lots of 3-7 squares along its length, with an occasional 1-square alley between. */
+  const lots = (from: number, to: number): { a: number; b: number }[] => {
+    const out: { a: number; b: number }[] = [];
+    let p = from;
+    while (p <= to) {
+      const len = Math.min(rng.int(3, 7), to - p + 1);
+      if (to - (p + len) + 1 < 3) {
+        out.push({ a: p, b: to });
+        break;
       }
-      if (r.w >= r.h) {
-        const at = rng.int(3, r.w - 3);
-        split({ x: r.x, y: r.y, w: at, h: r.h });
-        split({ x: r.x + at, y: r.y, w: r.w - at, h: r.h });
-      } else {
-        const at = rng.int(3, r.h - 3);
-        split({ x: r.x, y: r.y, w: r.w, h: at });
-        split({ x: r.x, y: r.y + at, w: r.w, h: r.h - at });
-      }
-    };
-    split(bounds(cells));
-    for (const lot of lots) {
-      const lotCells: Point[] = [];
-      for (let y = lot.y; y < lot.y + lot.h; y++) for (let x = lot.x; x < lot.x + lot.w; x++) if (inBlock.has(idx(map, x, y))) lotCells.push({ x, y });
-      if (lotCells.length === 0) continue;
-      if (lot.w >= 4 && lot.h >= 4 && rng.chance(0.12) && yardN < (walled ? 24 : 10)) {
-        yardN++;
-        for (const p of lotCells) if (rng.chance(0.12)) set(p.x, p.y, rng.chance(0.5) ? 'tree' : 'brush');
-        const c = rectCenter(lot);
-        set(c.x, c.y, 'ground');
-        rooms.push({ id: `yard-${yardN}`, kind: 'room', rect: lot, label: rng.chance(0.5) ? `Yard ${yardN}` : `Garden ${yardN}`, visibility: 'public' });
-        continue;
-      }
-      // Building: the lot, minus an alley on its far sides now and then.
-      const trimR = rng.chance(0.45),
-        trimB = rng.chance(0.45);
-      for (const p of lotCells) {
-        if ((trimR && p.x === lot.x + lot.w - 1) || (trimB && p.y === lot.y + lot.h - 1)) continue;
-        set(p.x, p.y, 'wall');
+      out.push({ a: p, b: p + len - 1 });
+      p += len + (rng.chance(0.22) ? 1 : 0); // alley gap
+    }
+    return out;
+  };
+  let courtN = 0;
+  for (const B of blocks) {
+    if (plazas.has(B)) continue;
+    if (B.w < 9 || B.h < 9) {
+      // Narrow block: a single row of houses across its short side, separated by alleys.
+      const along = B.w >= B.h;
+      for (const l of lots(along ? B.x : B.y, along ? B.x + B.w - 1 : B.y + B.h - 1))
+        building(along ? { x: l.a, y: B.y, w: l.b - l.a + 1, h: B.h } : { x: B.x, y: l.a, w: B.w, h: l.b - l.a + 1 });
+      continue;
+    }
+    const d = Math.max(3, Math.min(rng.int(4, 6), Math.floor((Math.min(B.w, B.h) - 3) / 2)));
+    const back = () => (rng.chance(0.4) ? 1 : 0); // ragged back lines
+    // Frontage along the top and bottom streets...
+    for (const l of lots(B.x, B.x + B.w - 1)) {
+      const b1 = back(),
+        b2 = back();
+      building({ x: l.a, y: B.y, w: l.b - l.a + 1, h: d - b1 });
+      building({ x: l.a, y: B.y + B.h - d + b2, w: l.b - l.a + 1, h: d - b2 });
+    }
+    // ...and the left and right streets, between the corners.
+    for (const l of lots(B.y + d + 1, B.y + B.h - d - 2)) {
+      const b1 = back(),
+        b2 = back();
+      building({ x: B.x, y: l.a, w: d - b1, h: l.b - l.a + 1 });
+      building({ x: B.x + B.w - d + b2, y: l.a, w: d - b2, h: l.b - l.a + 1 });
+    }
+    // Courtyard behind the houses; sometimes a back house closes off an alley (a dead end).
+    const court: Rect = { x: B.x + d, y: B.y + d, w: B.w - 2 * d, h: B.h - 2 * d };
+    if (court.w >= 5 && court.h >= 5 && rng.chance(0.5)) {
+      const bw = rng.int(2, Math.min(4, court.w - 3)),
+        bh = rng.int(2, Math.min(4, court.h - 3));
+      building({ x: court.x + rng.int(1, court.w - bw - 1), y: court.y + rng.int(1, court.h - bh - 1), w: bw, h: bh });
+    }
+    for (let y = court.y; y < court.y + court.h; y++)
+      for (let x = court.x; x < court.x + court.w; x++) if (get(x, y) === 'ground' && rng.chance(0.07)) set(x, y, rng.chance(0.5) ? 'tree' : 'brush');
+    if (court.w >= 3 && court.h >= 3 && courtN < (walled ? 26 : 12)) {
+      const c = rectCenter(court);
+      if (get(c.x, c.y) === 'tree' || get(c.x, c.y) === 'brush') set(c.x, c.y, 'ground');
+      if (get(c.x, c.y) === 'ground') {
+        courtN++;
+        rooms.push({ id: `court-${courtN}`, kind: 'room', rect: court, label: rng.chance(0.5) ? `Courtyard ${courtN}` : `Garden ${courtN}`, visibility: 'public' });
       }
     }
-  });
+  }
 
-  // Make sure every yard can be reached: cut an alley to the nearest street if not.
-  const spawn = { x: 0, y: ay };
+  // Every courtyard must be reachable: if not, knock down the house(s) in the way to open an alley.
+  const spawn = { x: 0, y: ys[aj].pos + 1 };
   let reach = reachable(map, spawn);
   for (const room of rooms) {
     const c = rectCenter(room.rect);
     if (reach[idx(map, c.x, c.y)]) continue;
     const targets = new Set<number>();
     reach.forEach((v, i) => v && targets.add(i));
-    const path = route(W, H, (i) => (map.terrain[i] === 'wall' ? 4 : map.terrain[i] === 'deepwater' ? Infinity : 1), idx(map, c.x, c.y), targets, 0.2);
-    for (const i of path) if (map.terrain[i] === 'wall' || map.terrain[i] === 'tree') map.terrain[i] = 'ground';
+    const path = route(W, H, (i) => (map.terrain[i] === 'wall' ? 6 : map.terrain[i] === 'deepwater' || map.terrain[i] === 'door' ? Infinity : 1), idx(map, c.x, c.y), targets, 0.2);
+    for (const i of path) {
+      if (map.terrain[i] !== 'wall') continue;
+      const x = i % W,
+        y = (i - x) / W;
+      const hit = structures.findIndex((s) => s.type === 'building' && x >= s.rect.x && y >= s.rect.y && x < s.rect.x + s.rect.w && y < s.rect.y + s.rect.h);
+      if (hit < 0) continue;
+      const r = structures[hit].rect;
+      for (let yy = r.y; yy < r.y + r.h; yy++) for (let xx = r.x; xx < r.x + r.w; xx++) set(xx, yy, 'ground');
+      structures.splice(hit, 1);
+    }
     reach = reachable(map, spawn);
   }
 
+  // Safety net: a place that still can't be reached isn't a place.
+  const placed = rooms.filter((r) => {
+    const c = rectCenter(r.rect);
+    return reach[idx(map, c.x, c.y)] === 1;
+  });
   map.spawn = spawn;
-  map.objects = [...orderRooms(rooms, spawn), ...props.objects];
+  map.objects = [...orderRooms(placed, spawn), ...doors, ...props.objects, ...structures];
   return { map, issues: validateDungeon(map) };
 }

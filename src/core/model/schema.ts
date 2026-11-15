@@ -36,6 +36,7 @@ const mapObject = z.discriminatedUnion('kind', [
   }),
   z.object({ ...base, kind: z.literal('note'), at: point, text: z.string() }),
   z.object({ ...base, kind: z.literal('furniture'), rect, type: z.enum(FURNITURE_TYPES) }),
+  z.object({ ...base, kind: z.literal('structure'), rect, type: z.enum(['building', 'wall', 'tower']) }),
   z.object({ ...base, kind: z.literal('loot'), at: point, container: z.enum(['chest', 'pile']), items: z.array(itemStackSchema) }),
 ]);
 

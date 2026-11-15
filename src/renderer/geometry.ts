@@ -61,8 +61,18 @@ export function wallSegments(map: DungeonMap): Segment[] {
  * horizontal bar and you pass through it vertically.
  */
 export function doorOrientation(map: DungeonMap, x: number, y: number): 'horizontal' | 'vertical' {
-  const lr = Number(!isOpenAt(map, x - 1, y)) + Number(!isOpenAt(map, x + 1, y));
-  const ud = Number(!isOpenAt(map, x, y - 1)) + Number(!isOpenAt(map, x, y + 1));
+  // Look past neighbouring door squares (wide gates are several doors side by side).
+  const rockAlong = (dx: number, dy: number) => {
+    let cx = x + dx,
+      cy = y + dy;
+    for (let k = 0; k < 6 && terrainAt(map, cx, cy) === 'door'; k++) {
+      cx += dx;
+      cy += dy;
+    }
+    return !isOpenAt(map, cx, cy) ? 1 : 0;
+  };
+  const lr = rockAlong(-1, 0) + rockAlong(1, 0);
+  const ud = rockAlong(0, -1) + rockAlong(0, 1);
   return lr >= ud ? 'horizontal' : 'vertical';
 }
 
