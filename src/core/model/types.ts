@@ -5,7 +5,7 @@
  * hover, viewport) never lives in these types.
  */
 
-export const SCHEMA_VERSION = 1;
+export const SCHEMA_VERSION = 2;
 
 export const TERRAINS = [
   'void', // solid rock / outside the dungeon
@@ -135,7 +135,57 @@ export interface StructureObject extends BaseObject {
   type: 'building' | 'wall' | 'tower';
 }
 
-export type MapObject = RoomObject | CorridorObject | DoorObject | StairsObject | NoteObject | LootObject | FurnitureObject | StructureObject;
+/** Points of interest: named places that matter in towns and the wilds. */
+export const POI_TYPES = [
+  // Town and city
+  'tavern',
+  'inn',
+  'temple',
+  'smithy',
+  'market',
+  'barracks',
+  'estate',
+  'thieves-den',
+  'docks',
+  'apothecary',
+  'stables',
+  'gatehouse',
+  'general-store',
+  // Wilderness
+  'bandit-camp',
+  'hermit-hut',
+  'shrine',
+  'cave-mouth',
+  'abandoned-farm',
+  'ranger-lodge',
+  'ruins',
+  'standing-stones',
+  'campsite',
+] as const;
+export type PoiType = (typeof POI_TYPES)[number];
+
+/**
+ * A named place. `at` is the square outside its entrance (where the party
+ * stands to go in); `rect` is the building or area it covers.
+ * DM-only (visibility 'dm') places don't show in Player view: hidden places
+ * stay that way until the party finds them.
+ */
+export interface PoiObject extends BaseObject {
+  kind: 'poi';
+  poiType: PoiType;
+  name: string;
+  at: Point;
+  rect?: Rect;
+  /** What players learn on arrival. */
+  description?: string;
+  dmNotes?: string;
+  /** Search DC to find a hidden place (DM reference). */
+  searchDc?: number;
+  /** Interior map generated on first entry. */
+  link?: { mapId: string };
+}
+
+export type MapObject = RoomObject | CorridorObject | DoorObject | StairsObject | NoteObject | LootObject | FurnitureObject | StructureObject | PoiObject;
 
 /** How a map is drawn: rock-and-corridor dungeon, building interior, or outdoors. */
 export type MapStyle = 'dungeon' | 'interior' | 'outdoor';
@@ -162,6 +212,10 @@ export interface DungeonMap {
   style?: MapStyle;
   /** Where the party starts, when there are no entrance stairs. */
   spawn?: Point;
+  /** For a building interior or a cave under a map: the place it was entered from. */
+  parent?: { mapId: string; poiId: string };
+  /** What the generator was asked for (shown in the toolbar). */
+  recipe?: { size: string; kind: string };
 }
 
 export const SIZES = ['tiny', 'small', 'medium', 'large', 'huge', 'gargantuan'] as const;
@@ -234,6 +288,45 @@ export interface Token {
   inventory?: ItemStack[];
   /** Creature library template this was made from. */
   templateId?: string;
+  /** The NPC card this token stands for. */
+  npcId?: string;
+}
+
+/** 2024 rules: a creature's attitude toward the party. */
+export const ATTITUDES = ['friendly', 'indifferent', 'hostile'] as const;
+export type Attitude = (typeof ATTITUDES)[number];
+
+/**
+ * A notable non-player character: a reference card the DM plays from.
+ * NPCs live on the campaign, not a map, so they can move between maps.
+ */
+export interface Npc {
+  id: string;
+  name: string;
+  occupation: string;
+  /** What players call them before they're introduced ("Burly blacksmith"). */
+  descriptor: string;
+  /** Introduced: players see the name instead of the descriptor. */
+  known: boolean;
+  attitude: Attitude;
+  appearance: string;
+  mannerism: string;
+  want: string;
+  secret: string;
+  /** Rumors and hooks they can share. */
+  rumors: string[];
+  notes?: string;
+  /** Map and place where they work, and where they live. */
+  mapId?: string;
+  workPoiId?: string;
+  homePoiId?: string;
+  /** Item library ids they sell. */
+  shop?: string[];
+  /**
+   * Reserved for the daily-routine simulation: where they are at each time
+   * of day (minutes since midnight). Not acted on yet.
+   */
+  schedule?: { at: number; poiId: string }[];
 }
 
 export type DiagonalPolicy =
@@ -259,6 +352,15 @@ export interface Ruleset {
   version: 'srd-5.2.1';
 }
 
+export const NAME_STYLES = ['generic'] as const;
+export type NameStyle = (typeof NAME_STYLES)[number];
+
+export interface CampaignSettings {
+  grid: GridPolicy;
+  partyLevel?: number;
+  nameStyle?: NameStyle;
+}
+
 export interface Campaign {
   schemaVersion: typeof SCHEMA_VERSION;
   id: string;
@@ -266,7 +368,13 @@ export interface Campaign {
   ruleset: Ruleset;
   maps: DungeonMap[];
   tokens: Token[];
-  settings: {
-    grid: GridPolicy;
-  };
+  settings: CampaignSettings;
+  /** The map on screen when the campaign was saved. */
+  activeMapId?: string;
+  /** Explored squares per map, run-length encoded (see encodeFog). */
+  fog?: Record<string, string>;
+  npcs?: Npc[];
+  /** World time. Reserved for the simulation; kept so saves carry it forward. */
+  clock?: { day: number; minute: number };
+  updatedAt?: string;
 }

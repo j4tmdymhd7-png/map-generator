@@ -749,3 +749,183 @@ dialog.library > footer {
 .lib-list .row input {
   width: 0;
 }
+
+/* Campaigns, places and people */
+.app {
+  grid-template-rows: auto auto auto 1fr auto;
+}
+.app.loading {
+  grid-template-rows: auto 1fr;
+}
+.loading-note {
+  padding: 2rem;
+  color: #a8a8b3;
+}
+.campaign-bar {
+  padding-top: 0.4rem;
+  padding-bottom: 0.4rem;
+}
+.save-state {
+  margin-left: auto;
+  font-size: 0.85rem;
+  color: #a8a8b3;
+}
+.save-state.saving::before {
+  content: '… ';
+}
+.save-state.saved::before {
+  content: '✓ ';
+}
+.save-state.error {
+  color: #e9e9ec;
+  border: 1px dashed #e9e9ec;
+  border-radius: 6px;
+  padding: 0.1rem 0.5rem;
+}
+.save-state.error::before {
+  content: '⚠ ';
+}
+label.inline {
+  display: inline-flex;
+  gap: 0.4rem;
+  align-items: center;
+}
+.location {
+  display: grid;
+  gap: 0.4rem;
+  padding: 0.5rem 0.6rem;
+  margin-bottom: 0.9rem;
+  border: 1px dashed #a8a8b3;
+  border-radius: 8px;
+}
+.location p {
+  margin: 0;
+}
+.poi-panel,
+.npc-card {
+  display: grid;
+  gap: 0.5rem;
+  padding: 0.6rem;
+  margin-bottom: 0.9rem;
+  border: 2px solid #e9e9ec;
+  border-radius: 8px;
+}
+.npc-card {
+  border-style: double;
+  border-width: 4px;
+}
+.lib-detail .npc-card {
+  border: none;
+  padding: 0;
+}
+.poi-panel header,
+.npc-card header {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 0.5rem;
+}
+.poi-panel h2,
+.npc-card h2 {
+  margin: 0;
+  font-size: 1rem;
+}
+.poi-panel p,
+.npc-card p {
+  margin: 0;
+}
+.poi-panel .fine,
+.npc-card .fine,
+.campaign-body .fine,
+.people-list small,
+.place-list small {
+  color: #a8a8b3;
+  font-size: 0.82rem;
+}
+.npc-fields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.45rem 0.6rem;
+}
+.npc-fields label {
+  display: grid;
+  gap: 0.2rem;
+  font-size: 0.85rem;
+  min-width: 0;
+}
+.npc-fields label.check {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+.npc-fields .wide {
+  grid-column: 1 / -1;
+}
+.npc-fields input,
+.npc-fields select,
+.npc-fields textarea {
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+}
+.npc-fields input[type='checkbox'] {
+  width: auto;
+}
+.npc-shop ul,
+.people-list,
+.place-list {
+  list-style: none;
+  margin: 0 0 0.4rem;
+  padding: 0;
+  display: grid;
+  gap: 0.3rem;
+}
+.npc-shop h3 {
+  margin: 0.2rem 0 0.4rem;
+  font-size: 0.9rem;
+}
+.npc-shop li {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  align-items: center;
+}
+.npc-shop li .inv-name {
+  flex: 1;
+  min-width: 6rem;
+}
+.npc-shop > select {
+  width: 100%;
+}
+.poi-panel .row,
+.npc-card .row,
+.campaign-body .row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+.campaign-body {
+  display: grid;
+  gap: 1.2rem;
+  align-content: start;
+}
+.campaign-body h3 {
+  margin: 0 0 0.5rem;
+  font-size: 0.95rem;
+}
+.campaign-body section {
+  display: grid;
+  gap: 0.5rem;
+}
+.campaign-body .place-list li {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: center;
+}
+dialog.library > header .spacer {
+  flex: 1;
+}
+.place-list li {
+  padding: 0.15rem 0;
+}

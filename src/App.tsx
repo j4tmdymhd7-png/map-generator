@@ -1,13 +1,25 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { buildMap, createCampaign, descendants, mapTree, newCampaignId, npcToken, uniqueMapId, type BuildContext } from './campaign/build';
+import { CampaignDialog } from './campaign/CampaignDialog';
+import { exportCampaign, importCampaignFile, lastCampaignId, loadCampaign, saveCampaign } from './campaign/storage';
+import { placeGroup, startPoint } from './core/encounter/placement';
 import { rollEncounter } from './core/encounter/random';
-import { rollLoot, stockDungeon, tierForLevel } from './core/loot/generate';
+import { rollLoot, stackFrom, stockDungeon, tierForLevel } from './core/loot/generate';
+import type { ItemDef } from './core/loot/items';
 import { LootPanel } from './encounter/LootPanel';
 import { LibraryDialog } from './library/LibraryDialog';
-import { useLibrary } from './library/useLibrary';
+import { useLibrary, type Library } from './library/useLibrary';
 import { wanderAll } from './core/encounter/wander';
-import { generateMap, MAP_SIZES, SIZE_INFO, type MapKind, type MapSize } from './core/generator/maps';
+import { generateLinked, generateMap, MAP_SIZES, SIZE_INFO, type MapKind, type MapSize } from './core/generator/maps';
 import { idx } from './core/model/grid';
-import type { DoorState, DungeonMap, GridPolicy, ItemStack, LootObject, Point, Token } from './core/model/types';
+import { decodeFog, encodeFog } from './core/model/schema';
+import { SCHEMA_VERSION, type Campaign, type DoorState, type DungeonMap, type GridPolicy, type ItemStack, type LootObject, type NameStyle, type Npc, type Point, type PoiObject, type Token } from './core/model/types';
+import { generateNpc } from './core/world/npcs';
+import { POI_INFO } from './core/world/poi';
+import { drawPois, poiAt } from './renderer/poiLayer';
+import { NpcCard } from './world/NpcCard';
+import { PeopleDialog } from './world/PeopleDialog';
+import { PoiPanel } from './world/PoiPanel';
 import { footprintSquares } from './core/rules/dnd2024';
 import { createRng, randomSeed } from './core/rng';
 import { computeVisible, FOG_EXPLORED, FOG_HIDDEN, FOG_VISIBLE, updateFog } from './core/visibility/fog';
@@ -54,10 +66,82 @@ function footprint(t: Token, p: Point): Point[] {
   return out;
 }
 
+const DEFAULT_RECIPE = { seed: 'goblin-warren', size: 'medium' as MapSize, kind: 'dungeon' as MapKind };
+
+/** Loads the last campaign (or starts one), then hands it to the workspace. */
 export default function App() {
-  const [seed, setSeed] = useState('goblin-warren');
-  const [size, setSize] = useState<MapSize>('medium');
-  const [kind, setKind] = useState<MapKind>('dungeon');
+  const lib = useLibrary();
+  const [campaign, setCampaign] = useState<Campaign | null>(null);
+  const ctx = (c?: Partial<BuildContext>): BuildContext => ({ items: lib.items, creatures: lib.creatures, partyLevel: 3, used: lib.usedUniques, style: 'generic', newId: newTokenId, ...c });
+  const ctxRef = useRef(ctx);
+  useEffect(() => {
+    ctxRef.current = ctx;
+  });
+
+  useEffect(() => {
+    let live = true;
+    const id = lastCampaignId();
+    (id ? loadCampaign(id).catch(() => null) : Promise.resolve(null)).then((c) => {
+      if (live) setCampaign(c ?? createCampaign('First campaign', DEFAULT_RECIPE, ctxRef.current()));
+    });
+    return () => {
+      live = false;
+    };
+  }, []);
+
+  if (!campaign)
+    return (
+      <div className="app loading">
+        <header className="topbar">
+          <strong>{APP_NAME}</strong> <span className="version">v{APP_VERSION}</span>
+          <span className="date">{BUILD_DATE}</span>
+        </header>
+        <p className="loading-note">Opening your campaign…</p>
+      </div>
+    );
+  return <Workspace key={campaign.id} initial={campaign} lib={lib} onSwitch={setCampaign} newCampaign={(name, recipe, level) => createCampaign(name, recipe, ctx({ partyLevel: level }))} />;
+}
+
+function decodeAllFog(c: Campaign): Record<string, Uint8Array> {
+  const out: Record<string, Uint8Array> = {};
+  for (const m of c.maps) {
+    const text = c.fog?.[m.id];
+    const fog = text ? decodeFog(text, m.width * m.height) : null;
+    if (fog) out[m.id] = fog;
+  }
+  return out;
+}
+
+const isAdjacent = (a: Point, b: Point) => Math.max(Math.abs(a.x - b.x), Math.abs(a.y - b.y)) <= 1;
+
+function Workspace({
+  initial,
+  lib,
+  onSwitch,
+  newCampaign,
+}: {
+  initial: Campaign;
+  lib: Library;
+  onSwitch: (c: Campaign) => void;
+  newCampaign: (name: string, recipe: { seed: string; size: MapSize; kind: MapKind }, partyLevel: number) => Campaign;
+}) {
+  // ---- Campaign state (saved) ----------------------------------------------
+  const [name, setName] = useState(initial.name);
+  const [maps, setMaps] = useState(initial.maps);
+  const [activeMapId, setActiveMapId] = useState(initial.activeMapId ?? initial.maps[0].id);
+  const [tokens, setTokens] = useState(initial.tokens);
+  const [npcs, setNpcs] = useState<Npc[]>(initial.npcs ?? []);
+  const [partyLevel, setPartyLevel] = useState(initial.settings.partyLevel ?? 3);
+  const [nameStyle, setNameStyle] = useState<NameStyle>(initial.settings.nameStyle ?? 'generic');
+  const [autoDoors, setAutoDoors] = useState(initial.settings.grid.closedDoors === 'passable');
+  const [fogStore, setFogStore] = useState(() => decodeAllFog(initial));
+  const map = maps.find((m) => m.id === activeMapId) ?? maps[0];
+
+  // ---- New-map form ----------------------------------------------------------
+  const [seed, setSeed] = useState(map.parent ? DEFAULT_RECIPE.seed : (map.generation?.seed ?? DEFAULT_RECIPE.seed));
+  const [size, setSize] = useState<MapSize>(() => (!map.parent && MAP_SIZES.includes(map.recipe?.size as MapSize) ? (map.recipe!.size as MapSize) : DEFAULT_RECIPE.size));
+  const [kind, setKind] = useState<MapKind>(() => (SIZE_INFO[size].kinds.some((k) => k.kind === map.recipe?.kind) ? (map.recipe!.kind as MapKind) : SIZE_INFO[size].kinds[0].kind));
+
   const [showGrid, setShowGrid] = useState(true);
   const [roomNumbers, setRoomNumbers] = useState(true);
   const [hover, setHover] = useState<Point | null>(null);
@@ -66,33 +150,39 @@ export default function App() {
   // Play settings
   const [fogOn, setFogOn] = useState(true);
   const [playerView, setPlayerView] = useState(false);
-  const [sightFt, setSightFt] = useState(60);
-  const [autoDoors, setAutoDoors] = useState(true);
+  const [sightFt, setSightFt] = useState(map.style === 'outdoor' ? 120 : 60);
   const [encounterChance, setEncounterChance] = useState(0);
   const [wandering, setWandering] = useState(true);
-  const [partyLevel, setPartyLevel] = useState(3);
   const [libraryOpen, setLibraryOpen] = useState(false);
+  const [peopleOpen, setPeopleOpen] = useState(false);
+  const [campaignOpen, setCampaignOpen] = useState(false);
   const [lootId, setLootId] = useState<string | null>(null);
-  const lib = useLibrary();
+  const [poiId, setPoiId] = useState<string | null>(null);
+  const [npcId, setNpcId] = useState<string | null>(null);
   const tier = tierForLevel(partyLevel);
+  const ctx: BuildContext = { items: lib.items, creatures: lib.creatures, partyLevel, used: lib.usedUniques, style: nameStyle, newId: newTokenId };
 
-  // The generated map plus live edits (doors, loot) layered on top. Each new
-  // map is stocked with loot from the item library.
-  const generated = useMemo(() => generateMap(seed, size, kind), [seed, size, kind]);
-  const stock = (m: DungeonMap, rngSeed: string, used: Set<string>): DungeonMap => ({
-    ...m,
-    objects: [...m.objects.filter((o) => o.kind !== 'loot'), ...stockDungeon(m, createRng(rngSeed), lib.items, partyLevel, used)],
-  });
-  const [mapState, setMapState] = useState(() => ({ source: generated, map: stock(generated.map, `${seed}:loot`, lib.usedUniques) }));
-  if (mapState.source !== generated) setMapState({ source: generated, map: stock(generated.map, `${seed}:loot`, lib.usedUniques) });
-  const map = mapState.source === generated ? mapState.map : generated.map;
-  const setDoor = (p: Point, state: DoorState) => setMapState((ms) => ({ ...ms, map: withDoorState(ms.map, p, state) }));
-  const editMap = (fn: (m: DungeonMap) => DungeonMap) => setMapState((ms) => ({ ...ms, map: fn(ms.map) }));
+  const editMap = (fn: (m: DungeonMap) => DungeonMap, id = map.id) => setMaps((ms) => ms.map((m) => (m.id === id ? fn(m) : m)));
+  const setDoor = (p: Point, state: DoorState) => editMap((m) => withDoorState(m, p, state));
   const lootObjects = map.objects.filter((o): o is LootObject => o.kind === 'loot');
   const lootAt = (p: Point) => lootObjects.find((l) => l.at.x === p.x && l.at.y === p.y) ?? null;
   const setLootItems = (id: string, items: ItemStack[]) =>
     editMap((m) => ({ ...m, objects: m.objects.map((o) => (o.kind === 'loot' && o.id === id ? { ...o, items } : o)) }));
   const pocketLoot = () => rollLoot(createRng(randomSeed()), tier, 'pocket', lib.items, lib.usedUniques);
+  const pois = map.objects.filter((o): o is PoiObject => o.kind === 'poi');
+  const editPoi = (id: string, patch: Partial<PoiObject>) => editMap((m) => ({ ...m, objects: m.objects.map((o) => (o.kind === 'poi' && o.id === id ? { ...o, ...patch } : o)) }));
+  const npcById = useMemo(() => new Map(npcs.map((n) => [n.id, n])), [npcs]);
+  const editNpc = (id: string, patch: Partial<Npc>) => {
+    setNpcs((ns) => ns.map((n) => (n.id === id ? { ...n, ...patch } : n)));
+    if (patch.name !== undefined || patch.attitude !== undefined)
+      setTokens((ts) =>
+        ts.map((t) =>
+          t.npcId === id
+            ? { ...t, ...(patch.name !== undefined ? { label: patch.name } : {}), ...(patch.attitude !== undefined ? { side: patch.attitude === 'hostile' ? ('enemy' as const) : ('neutral' as const) } : {}) }
+            : t,
+        ),
+      );
+  };
 
   const policy: GridPolicy = useMemo(() => ({ diagonal: 'uniform', closedDoors: autoDoors ? 'passable' : 'block' }), [autoDoors]);
   const controller = useRef<MapViewController | null>(null);
@@ -101,11 +191,14 @@ export default function App() {
   // Where a moving token currently is (so fog opens up as it walks).
   const [stepPos, setStepPos] = useState<{ id: string; pos: Point } | null>(null);
 
-  const enc = useEncounter(map, requestDraw, {
+  const enc = useEncounter(map, tokens, setTokens, requestDraw, {
     policy,
     onStep: (t, sq) => {
       setStepPos({ id: t.id, pos: sq });
       if (t.side === 'party') {
+        const door = pois.find((p) => POI_INFO[p.poiType].inside && p.at.x === sq.x && p.at.y === sq.y && (p.visibility === 'public' || !playerView));
+        if (door) setMessage({ text: `${t.label} is at the way into ${door.name}. Press E to go in.` });
+        else if (map.parent && isAdjacent(sq, startPoint(map))) setMessage({ text: `${t.label} is at the way out. Press E to leave.` });
         const found = map.objects.find((o) => o.kind === 'loot' && o.items.length > 0 && Math.abs(o.at.x - sq.x) <= 1 && Math.abs(o.at.y - sq.y) <= 1);
         if (found && found.kind === 'loot') setMessage({ text: `${t.label} found ${found.container === 'chest' ? 'a chest' : 'some loot'}. Click it to see what's inside.` });
       }
@@ -158,7 +251,7 @@ export default function App() {
   };
   const restock = () => {
     const used = new Set([...lib.usedUniques, ...party.flatMap((t) => (t.inventory ?? []).map((s) => s.defId ?? ''))]);
-    setMapState((ms) => ({ ...ms, map: stock(ms.map, randomSeed(), used) }));
+    editMap((m) => ({ ...m, objects: [...m.objects.filter((o) => o.kind !== 'loot'), ...stockDungeon(m, createRng(randomSeed()), lib.items, partyLevel, used)] }));
     setLootId(null);
     setMessage({ text: 'Loot rerolled for the whole dungeon.', dmOnly: true });
   };
@@ -173,11 +266,13 @@ export default function App() {
     [enc.tokens, stepPos, map.id],
   );
   const visible = useMemo(() => computeVisible(map, viewers, sightFt / map.cellSizeFeet), [map, viewers, sightFt]);
-  const [fogMem, setFogMem] = useState(() => ({ mapId: map.id, visible, fog: updateFog(null, visible) }));
+  // Fog memory for the map on screen; other maps' fog waits in fogStore.
+  const [fogMem, setFogMem] = useState(() => ({ mapId: map.id, visible, fog: updateFog(fogStore[map.id] ?? null, visible) }));
   if (fogMem.mapId !== map.id || fogMem.visible !== visible) {
-    setFogMem({ mapId: map.id, visible, fog: updateFog(fogMem.mapId === map.id ? fogMem.fog : null, visible) });
+    if (fogMem.mapId !== map.id) setFogStore((s) => ({ ...s, [fogMem.mapId]: fogMem.fog }));
+    setFogMem({ mapId: map.id, visible, fog: updateFog(fogMem.mapId === map.id ? fogMem.fog : (fogStore[map.id] ?? null), visible) });
   }
-  const fog = fogMem.mapId === map.id && fogMem.visible === visible ? fogMem.fog : updateFog(null, visible);
+  const fog = fogMem.mapId === map.id && fogMem.visible === visible ? fogMem.fog : updateFog(fogStore[map.id] ?? null, visible);
   const fogAt = (p: Point) => (fogOn ? fog[idx(map, p.x, p.y)] : FOG_VISIBLE);
   /** What players are allowed to see of a token: party always; others only while in sight. */
   const playersSee = (t: Token) => t.side === 'party' || !fogOn || footprint(t, t.position).some((c) => fogAt(c) === FOG_VISIBLE);
@@ -185,6 +280,150 @@ export default function App() {
 
   const revealAll = () => setFogMem((f) => ({ ...f, fog: f.fog.map((v) => (v === FOG_HIDDEN ? FOG_EXPLORED : v)) }));
   const reshroud = () => setFogMem((f) => ({ ...f, fog: updateFog(null, f.visible) }));
+
+
+  // ---- Places, people and travel -------------------------------------------
+  const disguise = (t: Token): Token => {
+    const n = t.npcId ? npcById.get(t.npcId) : undefined;
+    return n && !n.known ? { ...t, label: n.descriptor } : t;
+  };
+  const poiSeen = (p: PoiObject) => !fogOn || fogAt(p.at) !== FOG_HIDDEN || (!!p.rect && fogAt({ x: p.rect.x + (p.rect.w >> 1), y: p.rect.y + (p.rect.h >> 1) }) !== FOG_HIDDEN);
+  const visiblePoi = (p: PoiObject | null) => (p && (!playerView || (p.visibility === 'public' && poiSeen(p))) ? p : null);
+  const selectedPoi = poiId ? (pois.find((p) => p.id === poiId) ?? null) : null;
+  const parentMap = map.parent ? (maps.find((m) => m.id === map.parent!.mapId) ?? null) : null;
+
+  /** Move the party on map `fromId` to `target`, next to `near`. */
+  const moveParty = (fromId: string, target: DungeonMap, near: Point) =>
+    setTokens((ts) => {
+      const party = ts.filter((t) => t.side === 'party' && t.mapId === fromId);
+      const rest = ts.filter((t) => !(t.side === 'party' && t.mapId === fromId));
+      return [...rest, ...placeGroup(target, party, near, rest.filter((t) => t.mapId === target.id))];
+    });
+
+  const goTo = (target: DungeonMap) => {
+    setActiveMapId(target.id);
+    setPoiId(null);
+    setLootId(null);
+    setNpcId(null);
+    if (target.style === 'outdoor') setSightFt((s) => Math.max(s, 120));
+  };
+
+  const enter = (poi: PoiObject) => {
+    let target = poi.link ? maps.find((m) => m.id === poi.link!.mapId) : undefined;
+    if (!target) {
+      const res = generateLinked(map, poi);
+      if (!res) {
+        setMessage({ text: `${poi.name} has no inside to go into.` });
+        return;
+      }
+      res.map.id = uniqueMapId(maps, res.map.id);
+      res.map.parent = { mapId: map.id, poiId: poi.id };
+      const built = buildMap(res.map, ctx, npcs, poi);
+      target = built.map;
+      const linkTo = target.id;
+      setMaps((ms) => [...ms.map((m) => (m.id === map.id ? { ...m, objects: m.objects.map((o) => (o.id === poi.id && o.kind === 'poi' ? { ...o, link: { mapId: linkTo } } : o)) } : m)), built.map]);
+      setNpcs((ns) => [...ns, ...built.npcs]);
+      setTokens((ts) => [...ts, ...built.tokens]);
+    }
+    moveParty(map.id, target, startPoint(target));
+    goTo(target);
+    setMessage({ text: `The party goes into ${poi.name}.` });
+  };
+
+  const leave = () => {
+    if (!parentMap || !map.parent) return;
+    const poi = parentMap.objects.find((o): o is PoiObject => o.kind === 'poi' && o.id === map.parent!.poiId);
+    moveParty(map.id, parentMap, poi?.at ?? startPoint(parentMap));
+    goTo(parentMap);
+    setMessage({ text: `The party leaves ${map.title}.` });
+  };
+
+  /** A new top-level map from the toolbar recipe. `replace` swaps it in for the current map. */
+  const newMap = (replace: boolean) => {
+    const removed = replace ? [map.id, ...descendants(maps, map.id)] : [];
+    if (replace && removed.length > 1 && !window.confirm(`Replacing this map also removes the ${removed.length - 1} place${removed.length > 2 ? 's' : ''} inside it, and the people there. Go ahead?`)) return;
+    const res = generateMap(seed, size, kind, nameStyle);
+    const keep = maps.filter((m) => !removed.includes(m.id));
+    res.map.id = uniqueMapId(keep, res.map.id);
+    const built = buildMap(res.map, ctx, npcs);
+    setMaps(replace ? maps.flatMap((m) => (m.id === map.id ? [built.map] : removed.includes(m.id) ? [] : [m])) : [...maps, built.map]);
+    setNpcs((ns) => [...ns.filter((n) => !n.mapId || !removed.includes(n.mapId)), ...built.npcs]);
+    setTokens((ts) => {
+      const party = ts.filter((t) => t.side === 'party' && (t.mapId === map.id || removed.includes(t.mapId)));
+      const rest = ts.filter((t) => !removed.includes(t.mapId) && !party.includes(t));
+      return [...rest, ...built.tokens, ...placeGroup(built.map, party, startPoint(built.map), built.tokens)];
+    });
+    if (replace) setFogStore((s) => Object.fromEntries(Object.entries(s).filter(([id]) => !removed.includes(id))));
+    goTo(built.map);
+    setSightFt(size === 'huge' || size === 'gargantuan' ? 120 : 60);
+    setMessage({ text: replace ? `Map replaced: ${built.map.title}.` : `New map added: ${built.map.title}. The party is there now.` });
+  };
+
+  const placeNpc = (npc: Npc) => {
+    const t = npcToken(npc, map.id, newTokenId());
+    const work = npc.workPoiId ? pois.find((p) => p.id === npc.workPoiId) : undefined;
+    const near = enc.selected?.position ?? work?.at ?? startPoint(map);
+    const [placed] = placeGroup(map, [t], near, enc.tokens);
+    setTokens((ts) => [...ts, placed]);
+    enc.select(placed.id);
+    setNpcId(null);
+  };
+  const sell = (item: ItemDef, to: Token) => {
+    addToInventory(to, stackFrom(item));
+    setMessage({ text: `${to.label} buys ${item.name}${item.valueGp !== undefined ? ` for ${item.valueGp} gp` : ''}.` });
+  };
+  const npcCard = (n: Npc, close?: () => void) => {
+    const work = n.workPoiId ? maps.flatMap((m) => m.objects).find((o): o is PoiObject => o.kind === 'poi' && o.id === n.workPoiId) : undefined;
+    return (
+      <NpcCard
+        key={n.id}
+        npc={n}
+        playerView={playerView}
+        items={lib.items}
+        party={party}
+        placeName={work?.name}
+        onChange={(patch) => editNpc(n.id, patch)}
+        onSell={sell}
+        onPlace={enc.tokens.some((t) => t.npcId === n.id) ? undefined : () => placeNpc(n)}
+        onClose={close}
+      />
+    );
+  };
+
+  // ---- Saving ------------------------------------------------------------------
+  const [saveState, setSaveState] = useState<'saved' | 'saving' | 'error'>('saved');
+  const snapshot = (): Campaign => {
+    const fogs = { ...fogStore, [fogMem.mapId]: fogMem.fog };
+    const ids = new Set(maps.map((m) => m.id));
+    return {
+      schemaVersion: SCHEMA_VERSION,
+      id: initial.id,
+      name,
+      ruleset: initial.ruleset,
+      maps,
+      tokens,
+      settings: { grid: policy, partyLevel, nameStyle },
+      activeMapId: map.id,
+      fog: Object.fromEntries(Object.entries(fogs).filter(([id]) => ids.has(id)).map(([id, f]) => [id, encodeFog(f)])),
+      npcs,
+      clock: initial.clock,
+      updatedAt: new Date().toISOString(),
+    };
+  };
+  const snapshotRef = useRef(snapshot);
+  useEffect(() => {
+    snapshotRef.current = snapshot;
+  });
+  useEffect(() => {
+    const t = setTimeout(() => {
+      setSaveState('saving');
+      saveCampaign(snapshotRef.current())
+        .then(() => setSaveState('saved'))
+        .catch(() => setSaveState('error'));
+    }, 800);
+    return () => clearTimeout(t);
+  }, [name, maps, tokens, npcs, fogMem.fog, activeMapId, partyLevel, nameStyle, policy]);
+  const saveNow = () => saveCampaign(snapshotRef.current()).catch(() => undefined);
 
   // ---- Random encounters --------------------------------------------------
   const rollNow = (prefix = '') => {
@@ -211,7 +450,7 @@ export default function App() {
         note += ` ${res.moved.length} unseen creature${res.moved.length > 1 ? 's' : ''} moved in the dark (${res.moved.map((t) => t.label).join(', ')}).`;
       }
     }
-    if (encounterChance > 0 && Math.random() < encounterChance) {
+    if (encounterChance > 0 && createRng(randomSeed()).chance(encounterChance)) {
       rollNow(note + ' ');
       return;
     }
@@ -244,14 +483,15 @@ export default function App() {
     [enc.preview.reachable, playerView, fogOn, fog, map],
   );
 
-  useEffect(() => requestDraw(), [enc.tokens, enc.selected, reachable, hoverPath, fog, fogOn, playerView, requestDraw]);
+  useEffect(() => requestDraw(), [enc.tokens, enc.selected, reachable, hoverPath, fog, fogOn, playerView, requestDraw, map, poiId, npcs]);
 
   const overlay = (ctx: CanvasRenderingContext2D, v: Viewport) => {
+    drawPois(ctx, v, pois, { playerView, selectedId: poiId, seen: poiSeen });
     if (fogOn) drawFog(ctx, v, fog, map.width, map.height, playerView ? 'players' : 'dm');
     if (enc.selected && !enc.busy) {
       drawMovePreview(ctx, v, { mover: enc.selected, reachable, path: hoverPath, target: hover });
     }
-    const shown = playerView ? enc.tokens.filter(playersSee) : enc.tokens;
+    const shown = playerView ? enc.tokens.filter(playersSee).map(disguise) : enc.tokens;
     drawTokens(ctx, v, shown, {
       selectedId: enc.selected?.id ?? null,
       animating: enc.animating.current,
@@ -288,6 +528,7 @@ export default function App() {
     const hit = hitRaw && (!playerView || playersSee(hitRaw)) ? hitRaw : null;
     if (hit && hit.id !== enc.selected?.id) {
       enc.select(hit.id);
+      setNpcId(null);
       setMessage(null);
       return;
     }
@@ -297,7 +538,9 @@ export default function App() {
         setLootId(loot.id === lootId ? null : loot.id);
         return;
       }
-      toggleDoor(cell, mods.shift);
+      if (toggleDoor(cell, mods.shift)) return;
+      const place = visiblePoi(poiAt(pois, cell));
+      setPoiId(place && place.id !== poiId ? place.id : null);
       return;
     }
     if (hit?.id === enc.selected.id) {
@@ -314,8 +557,20 @@ export default function App() {
       else nextRound();
       return true;
     }
-    if (e.key === 'Escape' && enc.selected) {
+    if (e.key === 'Escape' && (enc.selected || poiId || lootId)) {
       enc.select(null);
+      setPoiId(null);
+      setLootId(null);
+      return true;
+    }
+    if ((e.key === 'e' || e.key === 'E') && enc.selected) {
+      // Go in (or out) through an entrance next to the selected hero.
+      const t = enc.selected;
+      if (t.side !== 'party') return false;
+      const door = pois.find((p) => POI_INFO[p.poiType].inside && isAdjacent(p.at, t.position) && (p.visibility === 'public' || !playerView));
+      if (door) enter(door);
+      else if (map.parent && isAdjacent(startPoint(map), t.position)) leave();
+      else setMessage({ text: `${t.label} isn't next to a way in or out. Entrances are marked with a ◆.` });
       return true;
     }
     if ((e.key === 'o' || e.key === 'O') && enc.selected) {
@@ -339,6 +594,7 @@ export default function App() {
   const rooms = map.objects.filter((o) => o.kind === 'room').length;
   const hoverHidden = hiddenFromPlayers(hover);
   const terrain = hover && !hoverHidden ? map.terrain[hover.y * map.width + hover.x] : null;
+  const hoverPoi = hover && !hoverHidden ? visiblePoi(poiAt(pois, hover)) : null;
   const pathText = hoverPath
     ? hoverPath.legal
       ? `${enc.selected?.label} → ${hoverPath.totalFeet} ft${hoverPath.warnings.length ? ` · ${hoverPath.warnings.join(' ')}` : ''}`
@@ -349,7 +605,10 @@ export default function App() {
   const turnPrefix = activeToken ? `${activeToken.label}'s turn · ` : '';
   const hint = enc.selected
     ? `${turnPrefix}${enc.selected.label} selected · ${enc.remaining(enc.selected)} ft left · click a square to move, O to open/close an adjacent door, Esc to deselect`
-    : `${turnPrefix}${map.width}×${map.height} · ${rooms} ${map.style === 'outdoor' ? 'places' : 'rooms'} · ${lootObjects.length} chests · N for ${enc.combat ? 'next turn' : 'next round'} · click a token to select it · click a door to open or close it (Shift-click to lock)`;
+    : `${turnPrefix}${map.width}×${map.height} · ${pois.length ? `${pois.length} places · ` : `${rooms} ${map.style === 'outdoor' ? 'places' : 'rooms'} · `}${lootObjects.length} chests · N for ${enc.combat ? 'next turn' : 'next round'} · click a token to select it · click a door to open or close it (Shift-click to lock)${pois.length ? ' · click a place for its card' : ''}`;
+  const encView = playerView ? { ...enc, tokens: enc.tokens.map(disguise), selected: enc.selected && disguise(enc.selected) } : enc;
+  const selectedNpc = enc.selected?.npcId ? npcById.get(enc.selected.npcId) : npcId ? npcById.get(npcId) : undefined;
+  const tree = mapTree(maps);
 
   return (
     <div className="app">
@@ -358,12 +617,41 @@ export default function App() {
         {playerView && <span className="mode-badge">Player view</span>}
         <span className="date">{BUILD_DATE}</span>
       </header>
+      <div className="toolbar campaign-bar" role="toolbar" aria-label="Campaign">
+        <button type="button" onClick={() => setCampaignOpen(true)} title="Rename, switch, back up or start campaigns">
+          Campaign: <strong>{name || 'Untitled'}</strong>
+        </button>
+        <label>
+          Map{' '}
+          <select value={map.id} onChange={(e) => goTo(maps.find((m) => m.id === e.target.value)!)} aria-label="Map on screen">
+            {tree.map(({ map: m, depth }) => (
+              <option key={m.id} value={m.id}>
+                {'\u2003'.repeat(depth)}
+                {depth ? '↳ ' : ''}
+                {m.title}
+                {tokens.some((t) => t.side === 'party' && t.mapId === m.id) ? ' (party here)' : ''}
+              </option>
+            ))}
+          </select>
+        </label>
+        {parentMap && (
+          <button type="button" onClick={leave} title="The party walks back out">
+            Leave to {parentMap.title}
+          </button>
+        )}
+        <button type="button" onClick={() => setPeopleOpen(true)}>
+          People &amp; places
+        </button>
+        <span className={`save-state ${saveState}`} role="status">
+          {saveState === 'saved' ? 'Saved' : saveState === 'saving' ? 'Saving…' : 'Not saved: browser storage unavailable. Export a file to keep your work.'}
+        </span>
+      </div>
       <div className="toolbar" role="toolbar" aria-label="Map options">
         <label>
           Seed <input value={seed} onChange={(e) => setSeed(e.target.value)} aria-label="Generator seed" />
         </label>
-        <button type="button" onClick={() => setSeed(randomSeed())}>
-          New random seed
+        <button type="button" onClick={() => setSeed(randomSeed())} aria-label="New random seed">
+          Random seed
         </button>
         <label title={SIZE_INFO[size].blurb}>
           Size{' '}
@@ -373,8 +661,6 @@ export default function App() {
               const next = e.target.value as MapSize;
               setSize(next);
               setKind(SIZE_INFO[next].kinds[0].kind);
-              // Outdoors you can see much farther than down a corridor.
-              setSightFt(next === 'huge' || next === 'gargantuan' ? 120 : 60);
             }}
           >
             {MAP_SIZES.map((s) => (
@@ -394,6 +680,18 @@ export default function App() {
             ))}
           </select>
         </label>
+        <button type="button" className="primary" onClick={() => newMap(false)} title="Add a map to the campaign and move the party there">
+          New map
+        </button>
+        <button
+          type="button"
+          onClick={() => newMap(true)}
+          disabled={!!map.parent}
+          title={map.parent ? 'Places inside another map are generated from it; replace the outer map instead' : 'Generate a different map in place of this one'}
+        >
+          Replace this map
+        </button>
+        <span className="toolbar-sep" aria-hidden />
         <label className="check">
           <input type="checkbox" checked={showGrid} onChange={(e) => setShowGrid(e.target.checked)} /> Grid
         </label>
@@ -428,7 +726,7 @@ export default function App() {
           controllerRef={controller}
         />
         <TokenPanel
-          enc={enc}
+          enc={encView}
           hideFromPlayers={playerView ? (t) => !playersSee(t) : undefined}
           playerView={playerView}
           creatures={lib.creatures}
@@ -436,6 +734,32 @@ export default function App() {
           onGive={giveFromToken}
           onDefeat={defeat}
         >
+          {map.parent && parentMap && (
+            <section className="location" aria-label="Where the party is">
+              <p>
+                Inside <strong>{map.title}</strong>, in {parentMap.title}.
+              </p>
+              <button type="button" onClick={leave}>
+                Leave to {parentMap.title}
+              </button>
+            </section>
+          )}
+          {selectedPoi && (
+            <PoiPanel
+              key={selectedPoi.id}
+              poi={selectedPoi}
+              people={npcs.filter((n) => n.workPoiId === selectedPoi.id)}
+              playerView={playerView}
+              onChange={(patch) => editPoi(selectedPoi.id, patch)}
+              onEnter={() => enter(selectedPoi)}
+              onOpenNpc={(n) => {
+                enc.select(null);
+                setNpcId(n.id);
+              }}
+              onClose={() => setPoiId(null)}
+            />
+          )}
+          {selectedNpc && npcCard(selectedNpc, () => (enc.selected?.npcId ? enc.select(null) : setNpcId(null)))}
           {selectedLoot &&
             (playerView ? (
               <p className="fine">Loot details are hidden in Player view.</p>
@@ -530,9 +854,70 @@ export default function App() {
         </TokenPanel>
       </div>
       {libraryOpen && <LibraryDialog lib={lib} onClose={() => setLibraryOpen(false)} />}
+      {peopleOpen && (
+        <PeopleDialog
+          npcs={npcs}
+          maps={maps}
+          current={map}
+          items={lib.items}
+          party={party}
+          nameStyle={nameStyle}
+          onNameStyle={setNameStyle}
+          onChangeNpc={editNpc}
+          onNewNpc={() => {
+            const n = generateNpc(createRng(randomSeed()), 'Commoner', 'Stranger', nameStyle);
+            n.mapId = map.id;
+            setNpcs((ns) => [...ns, n]);
+            return n;
+          }}
+          onDeleteNpc={(id) => {
+            setNpcs((ns) => ns.filter((n) => n.id !== id));
+            setTokens((ts) => ts.filter((t) => t.npcId !== id));
+          }}
+          onSell={sell}
+          onShowPlace={(p) => {
+            setPeopleOpen(false);
+            setPoiId(p.id);
+            controller.current?.centerOn?.(p.at);
+          }}
+          onClose={() => setPeopleOpen(false)}
+        />
+      )}
+      {campaignOpen && (
+        <CampaignDialog
+          currentId={initial.id}
+          name={name}
+          onRename={setName}
+          onOpen={async (id) => {
+            await saveNow();
+            const c = await loadCampaign(id).catch(() => null);
+            if (c) onSwitch(c);
+            else setMessage({ text: 'That campaign could not be opened.' });
+          }}
+          onNew={async (n) => {
+            await saveNow();
+            onSwitch(newCampaign(n, { seed, size, kind }, partyLevel));
+          }}
+          onExport={() => exportCampaign(snapshot())}
+          onImport={async (file) => {
+            try {
+              const c = await importCampaignFile(file);
+              // A fresh id, so an import never overwrites a campaign already saved here.
+              const imported = { ...c, id: newCampaignId() };
+              await saveNow();
+              await saveCampaign(imported);
+              onSwitch(imported);
+              return null;
+            } catch (e) {
+              return e instanceof Error ? e.message : 'Import failed.';
+            }
+          }}
+          onClose={() => setCampaignOpen(false)}
+        />
+      )}
       <footer className="statusbar" aria-live="polite">
         <span>{shownMessage ?? pathText ?? hint}</span>
-        <span>{hover ? (hoverHidden ? `Square ${hover.x}, ${hover.y} · unexplored` : `Square ${hover.x}, ${hover.y} · ${terrain}`) : ''}</span>
+        <span>{hover ? (hoverHidden ? `Square ${hover.x}, ${hover.y} · unexplored` : `Square ${hover.x}, ${hover.y} · ${terrain}${hoverPoi ? ` · ${hoverPoi.name}` : ''}`) : ''}</span>
       </footer>
     </div>
   );

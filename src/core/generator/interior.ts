@@ -12,8 +12,8 @@ import { createRng, type Rng } from '../rng';
 import type { GenerateResult } from './generate';
 import { validateDungeon } from './validate';
 
-export const INTERIOR_VERSION = 1;
-export type InteriorKind = 'tavern' | 'manor';
+export const INTERIOR_VERSION = 2;
+export type InteriorKind = 'tavern' | 'inn' | 'manor' | 'shop' | 'smithy' | 'temple' | 'barracks' | 'den' | 'warehouse' | 'stables' | 'cottage';
 
 interface Split {
   vertical: boolean; // wall runs top-to-bottom
@@ -45,12 +45,37 @@ function bsp(rng: Rng, r: Rect, depth: number, keepWhole: (r: Rect, depth: numbe
   }
 }
 
-const ROLES: Record<InteriorKind, { main: string; others: string[] }> = {
-  tavern: { main: 'Common room', others: ['Kitchen', 'Storeroom', 'Guest room', 'Guest room', 'Private room', 'Guest room', 'Guest room', 'Pantry'] },
+interface Plan {
+  title: string;
+  w: number;
+  h: number;
+  /** Share of the inside depth given to the front room. */
+  front: number;
+  maxRooms: number;
+  main: string;
+  others: string[];
+}
+
+const PLANS: Record<InteriorKind, Plan> = {
+  tavern: { title: 'Tavern', w: 28, h: 22, front: 0.55, maxRooms: 6, main: 'Common room', others: ['Kitchen', 'Storeroom', 'Guest room', 'Guest room', 'Private room', 'Guest room', 'Guest room', 'Pantry'] },
+  inn: { title: 'Inn', w: 32, h: 26, front: 0.42, maxRooms: 9, main: 'Common room', others: ['Kitchen', 'Storeroom', 'Guest room', 'Guest room', 'Guest room', 'Guest room', 'Private room', 'Guest room', 'Pantry'] },
   manor: {
+    title: 'Manor',
+    w: 38,
+    h: 30,
+    front: 0.4,
+    maxRooms: 11,
     main: 'Great hall',
     others: ['Kitchen', 'Storeroom', 'Study', 'Library', 'Master bedroom', 'Chapel', 'Bedroom', 'Servants’ quarters', 'Bedroom', 'Gallery', 'Pantry', 'Bedroom'],
   },
+  shop: { title: 'Shop', w: 22, h: 18, front: 0.5, maxRooms: 3, main: 'Shop floor', others: ['Storeroom', 'Workshop', 'Bedroom'] },
+  smithy: { title: 'Smithy', w: 24, h: 18, front: 0.55, maxRooms: 3, main: 'Forge', others: ['Storeroom', 'Workshop', 'Bedroom'] },
+  temple: { title: 'Temple', w: 30, h: 28, front: 0.58, maxRooms: 5, main: 'Nave', others: ['Vestry', 'Storeroom', 'Shrine room', 'Cell', 'Cell'] },
+  barracks: { title: 'Barracks', w: 28, h: 22, front: 0.4, maxRooms: 6, main: 'Guard room', others: ['Bunk room', 'Armory', 'Storeroom', 'Captain’s office', 'Cells', 'Bunk room'] },
+  den: { title: 'Den', w: 24, h: 20, front: 0.42, maxRooms: 4, main: 'Front room', others: ['Hideout', 'Storeroom', 'Counting room', 'Bunk room'] },
+  warehouse: { title: 'Warehouse', w: 30, h: 22, front: 0.6, maxRooms: 3, main: 'Warehouse floor', others: ['Storeroom', 'Office', 'Bunk room'] },
+  stables: { title: 'Stables', w: 28, h: 20, front: 0.6, maxRooms: 3, main: 'Stable', others: ['Tack room', 'Storeroom', 'Bedroom'] },
+  cottage: { title: 'Cottage', w: 20, h: 19, front: 0.5, maxRooms: 2, main: 'Main room', others: ['Storeroom', 'Bedroom'] },
 };
 
 const SOLID: Record<FurnitureType, boolean> = {
@@ -202,6 +227,66 @@ class Furnisher {
         this.alongWall(room, rng.chance(0.5) ? 'shelf' : 'barrel', 1);
         break;
       }
+      case 'Shop floor':
+        this.place(room, 'counter', { x: x + 1, y: y + h - 2, w: Math.max(2, w - 3), h: 1 });
+        this.alongWall(room, 'shelf', Math.max(3, Math.floor((w + h) / 2)));
+        break;
+      case 'Forge':
+        if (!this.place(room, 'hearth', { x: x + w - 2, y: y + h - 2, w: 2, h: 2 })) this.place(room, 'hearth', { x, y: y + h - 2, w: 2, h: 2 });
+        this.place(room, 'counter', { x: x + Math.floor(w / 2), y: y + Math.floor(h / 2) + 1, w: 1, h: 1 }); // anvil
+        this.alongWall(room, 'barrel', 2);
+        this.alongWall(room, 'shelf', 2);
+        break;
+      case 'Workshop':
+      case 'Tack room':
+        this.place(room, 'table', { x: x + 1, y: y + 1, w: 2, h: 1 });
+        this.alongWall(room, 'shelf', 3);
+        break;
+      case 'Nave':
+        this.place(room, 'counter', { x: x + Math.floor(w / 2) - 1, y: y + h - 1, w: 3, h: 1 }); // altar at the far end
+        for (let ty = y + 2; ty < y + h - 3; ty += 2) {
+          this.place(room, 'table', { x: x + 1, y: ty, w: Math.max(1, Math.floor(w / 2) - 2), h: 1 });
+          this.place(room, 'table', { x: x + Math.floor(w / 2) + 2, y: ty, w: Math.max(1, Math.ceil(w / 2) - 3), h: 1 });
+        }
+        break;
+      case 'Vestry':
+      case 'Shrine room':
+      case 'Office':
+      case 'Captain’s office':
+      case 'Counting room':
+        this.place(room, 'table', { x: x + Math.floor(w / 2) - 1, y: y + 1, w: 2, h: 1 });
+        this.alongWall(room, 'shelf', 2);
+        break;
+      case 'Cell':
+      case 'Cells':
+        this.place(room, 'bed', { x, y, w: 1, h: 2 });
+        if (role === 'Cells') this.place(room, 'bed', { x: x + w - 1, y, w: 1, h: 2 });
+        break;
+      case 'Bunk room':
+        for (let b = 0; b * 2 < w; b++) this.place(room, 'bed', { x: x + b * 2, y, w: 1, h: 2 });
+        break;
+      case 'Armory':
+        this.alongWall(room, 'shelf', w + h);
+        break;
+      case 'Guard room':
+      case 'Front room':
+      case 'Main room':
+        if (role !== 'Guard room') this.place(room, 'hearth', { x: x + w - 1, y: y + Math.floor(h / 2) - 1, w: 1, h: 2 });
+        tables(4, 3);
+        if (role === 'Guard room') this.alongWall(room, 'shelf', 2);
+        break;
+      case 'Hideout':
+        tables(4, 3);
+        this.alongWall(room, 'barrel', 3);
+        break;
+      case 'Warehouse floor':
+        this.alongWall(room, 'barrel', w + h);
+        for (let ty = y + 2; ty < y + h - 2; ty += 3) for (let tx = x + 2; tx < x + w - 2; tx += 4) this.place(room, 'barrel', { x: tx, y: ty, w: 1, h: 1 });
+        break;
+      case 'Stable':
+        for (let sx = x; sx + 1 < x + w; sx += 3) this.place(room, 'stall', { x: sx, y: y + h - 1, w: 2, h: 1 });
+        this.alongWall(room, 'barrel', 2);
+        break;
       case 'Study':
       case 'Library':
         this.alongWall(room, 'shelf', role === 'Library' ? w + h : 3);
@@ -219,10 +304,12 @@ class Furnisher {
 }
 
 export function generateInterior(seed: string, kind: InteriorKind): GenerateResult {
-  const rng = createRng(`interior:${INTERIOR_VERSION}:${kind}:${seed}`);
-  const W = kind === 'tavern' ? 28 : 38;
-  const H = kind === 'tavern' ? 22 : 30;
-  const map = createEmptyMap({ id: `map-small-${kind}-${seed}`, title: `${kind === 'tavern' ? 'Tavern' : 'Manor'} ${seed}`, width: W, height: H, fill: 'ground' });
+  // Version 1 interiors (tavern, manor) keep their old random stream, so saved seeds still match.
+  const rng = createRng(kind === 'tavern' || kind === 'manor' ? `interior:1:${kind}:${seed}` : `interior:${INTERIOR_VERSION}:${kind}:${seed}`);
+  const plan = PLANS[kind];
+  const W = plan.w;
+  const H = plan.h;
+  const map = createEmptyMap({ id: `map-small-${kind}-${seed}`, title: `${plan.title} ${seed}`, width: W, height: H, fill: 'ground' });
   map.style = 'interior';
   map.generation = { seed, generatorVersion: INTERIOR_VERSION, params: { kind } };
 
@@ -239,12 +326,12 @@ export function generateInterior(seed: string, kind: InteriorKind): GenerateResu
   // Split off the main room first (front of the building), then the rest.
   const leaves: Rect[] = [];
   const splits: Split[] = [];
-  const mainH = Math.max(MIN_ROOM + 1, Math.round(inner.h * (kind === 'tavern' ? 0.55 : 0.4)));
+  const mainH = Math.max(MIN_ROOM + 1, Math.round(inner.h * plan.front));
   const main: Rect = { x: inner.x, y: inner.y, w: inner.w, h: mainH };
   splits.push({ vertical: false, line: inner.y + mainH, from: inner.x, to: inner.x + inner.w - 1 });
   const back: Rect = { x: inner.x, y: inner.y + mainH + 1, w: inner.w, h: inner.h - mainH - 1 };
-  const maxRooms = kind === 'tavern' ? 6 : 11;
-  bsp(rng, back, 0, (r, d) => r.w * r.h <= 30 || (d >= 2 && rng.chance(0.35)) || leaves.length >= maxRooms - 1, leaves, splits);
+  const maxRooms = plan.maxRooms;
+  if (back.h >= 2) bsp(rng, back, 0, (r, d) => r.w * r.h <= (kind === 'cottage' ? 60 : 30) || (d >= 2 && rng.chance(0.35)) || leaves.length >= maxRooms - 1, leaves, splits);
   // The manor's great hall can lose a wing to a side room.
   if (kind === 'manor' && main.w >= 22) {
     const cut = main.w - rng.int(6, 8);
@@ -279,7 +366,7 @@ export function generateInterior(seed: string, kind: InteriorKind): GenerateResu
   map.spawn = { x: fx, y: 2 };
 
   // Yard: a few trees and bushes (a garden for the manor), never on the path.
-  const yardFeatures = kind === 'manor' ? 40 : 10;
+  const yardFeatures = kind === 'manor' ? 40 : kind === 'cottage' ? 24 : 10;
   for (let k = 0; k < yardFeatures; k++) {
     const x = rng.int(0, W - 1),
       y = rng.int(3, H - 1);
@@ -290,7 +377,7 @@ export function generateInterior(seed: string, kind: InteriorKind): GenerateResu
   }
 
   // Roles and furniture
-  const roles = ROLES[kind];
+  const roles = plan;
   const rooms: { rect: Rect; role: string }[] = [{ rect: main, role: roles.main }];
   const sorted = [...leaves].sort((a, b) => b.w * b.h - a.w * a.h);
   sorted.forEach((r, i) => rooms.push({ rect: r, role: roles.others[i % roles.others.length] }));

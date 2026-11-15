@@ -9,7 +9,10 @@
  */
 import { generateDungeon, type GenerateResult } from './generate';
 import { generateInterior } from './interior';
+import { validateDungeon } from './validate';
 import { generateForest, generateTown } from './outdoor';
+import type { DungeonMap, NameStyle, PoiObject } from '../model/types';
+import { placeTownPois, placeWildPois, POI_INFO } from '../world/poi';
 
 export const MAP_SIZES = ['small', 'medium', 'large', 'huge', 'gargantuan'] as const;
 export type MapSize = (typeof MAP_SIZES)[number];
@@ -58,7 +61,42 @@ export const SIZE_INFO: Record<MapSize, { label: string; blurb: string; kinds: {
   },
 };
 
-export function generateMap(seed: string, size: MapSize, kind: MapKind): GenerateResult {
+export function generateMap(seed: string, size: MapSize, kind: MapKind, style: NameStyle = 'generic'): GenerateResult {
+  const res = generateBase(seed, size, kind);
+  res.map.recipe = { size, kind };
+  if (size === 'huge' || size === 'gargantuan') {
+    if (kind === 'forest' || kind === 'wilderness') placeWildPois(res.map, seed, style);
+    else placeTownPois(res.map, seed, style);
+    res.issues = validateDungeon(res.map);
+  }
+  return res;
+}
+
+/**
+ * The map behind a place's door: a building interior, or a cave or crypt
+ * under the wilds. Deterministic for a given parent map and place.
+ */
+export function generateLinked(parent: DungeonMap, poi: PoiObject): GenerateResult | null {
+  const inside = POI_INFO[poi.poiType].inside;
+  if (!inside) return null;
+  const seed = `${parent.generation?.seed ?? parent.id}:${poi.id}`;
+  let res: GenerateResult;
+  if ('interior' in inside) {
+    res = generateInterior(seed, inside.interior);
+    res.map.recipe = { size: 'small', kind: inside.interior };
+  } else {
+    const theme = inside.underground === 'cave' ? 'cave' : 'dungeon';
+    res = generateDungeon(seed, { theme });
+    res.map.style = 'dungeon';
+    res.map.recipe = { size: 'medium', kind: theme };
+  }
+  res.map.id = `${parent.id}>${poi.id}`;
+  res.map.title = poi.name;
+  res.map.parent = { mapId: parent.id, poiId: poi.id };
+  return res;
+}
+
+function generateBase(seed: string, size: MapSize, kind: MapKind): GenerateResult {
   switch (size) {
     case 'small':
       return generateInterior(seed, kind === 'manor' ? 'manor' : 'tavern');

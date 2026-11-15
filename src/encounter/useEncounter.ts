@@ -2,9 +2,8 @@ import { useCallback, useMemo, useRef, useState } from 'react';
 import { placeGroup, startPoint } from '../core/encounter/placement';
 import { rollInitiative, sortInitiative, type InitiativeEntry } from '../core/encounter/initiative';
 import { createRng, randomSeed } from '../core/rng';
-import type { DungeonMap, GridPolicy, ItemStack, Point, RoomObject, StatBlock, Token } from '../core/model/types';
-import { STARTER_CREATURES, tokenFromTemplate, type CreatureTemplate } from '../core/library/creatures';
-import { rectCenter } from '../core/model/grid';
+import type { DungeonMap, GridPolicy, ItemStack, Point, Token } from '../core/model/types';
+import { tokenFromTemplate, type CreatureTemplate } from '../core/library/creatures';
 import { buildMoveGrid, describeAssumptions, footprintSquares } from '../core/rules/dnd2024';
 import { computeReach, pathTo, reachableDestinations, type PathResult } from '../core/rules/pathfinding';
 
@@ -22,34 +21,6 @@ export function newTokenId(): string {
 }
 
 const ab = (str: number, dex: number, con: number, int: number, wis: number, cha: number) => ({ str, dex, con, int, wis, cha });
-const pc = (ac: number, hp: number, abilities: StatBlock['abilities']): StatBlock => ({ ac, hp, maxHp: hp, abilities, notes: 'Placeholder stats: replace with the character sheet.' });
-
-function demoTokens(map: DungeonMap, creatures: CreatureTemplate[], pocketLoot: (t: CreatureTemplate) => ItemStack[]): Token[] {
-  const base = { mapId: map.id, position: { x: 0, y: 0 }, senses: {}, conditions: [], visibility: 'public' as const };
-  const party: Token[] = [
-    { ...base, id: newTokenId(), label: 'Brannoc', color: '#0072b2', size: 'medium', speeds: { walk: 30 }, side: 'party', stats: pc(18, 31, ab(16, 12, 15, 10, 12, 8)) },
-    { ...base, id: newTokenId(), label: 'Ilsa Vane', color: '#e69f00', size: 'medium', speeds: { walk: 30 }, side: 'party', stats: pc(12, 17, ab(8, 14, 13, 17, 12, 10)) },
-    { ...base, id: newTokenId(), label: 'Tamsin', color: '#009e73', size: 'small', speeds: { walk: 30 }, side: 'party', stats: pc(15, 22, ab(10, 17, 13, 12, 12, 13)) },
-    { ...base, id: newTokenId(), label: 'Old Grimm', color: '#cc79a7', size: 'medium', speeds: { walk: 30 }, side: 'party', stats: pc(17, 27, ab(14, 10, 15, 10, 16, 11)) },
-  ];
-  const template = (id: string) => creatures.find((c) => c.id === id) ?? STARTER_CREATURES.find((c) => c.id === id)!;
-  const foes: Token[] = ['ogre', 'goblin-boss'].map((id) => {
-    const tpl = template(id);
-    const t = tokenFromTemplate(tpl, newTokenId(), map.id);
-    t.color = id === 'ogre' ? '#d55e00' : '#56b4e9';
-    t.behavior = 'guard';
-    t.leash = 6;
-    if (tpl.carriesLoot) t.inventory = pocketLoot(tpl);
-    return t;
-  });
-  const placedParty = placeGroup(map, party, startPoint(map));
-  // Foes wait in the room farthest from the entrance.
-  const exit = map.objects.find((o) => o.kind === 'stairs' && o.role === 'exit');
-  const rooms = map.objects.filter((o): o is RoomObject => o.kind === 'room');
-  const lair = exit && exit.kind === 'stairs' ? exit.at : rooms.length ? rectCenter(rooms[rooms.length - 1].rect) : startPoint(map);
-  const placedFoes = placeGroup(map, foes, lair, placedParty).map((t) => ({ ...t, home: t.position }));
-  return [...placedParty, ...placedFoes];
-}
 
 export interface Encounter {
   tokens: Token[];
@@ -101,31 +72,27 @@ export interface EncounterOptions {
   pocketLoot: (t: CreatureTemplate) => ItemStack[];
 }
 
-export function useEncounter(map: DungeonMap, requestDraw: () => void, opts: EncounterOptions): Encounter {
-  const [state, setState] = useState(() => ({ mapId: map.id, tokens: demoTokens(map, opts.creatures, opts.pocketLoot) }));
-  // New map: re-place the cast (keeping names and portraits).
-  if (state.mapId !== map.id) {
-    const relocated = placeGroup(
-      map,
-      state.tokens.filter((t) => t.side === 'party'),
-      startPoint(map),
-    );
-    const exit = map.objects.find((o) => o.kind === 'stairs' && o.role === 'exit');
-    const others = placeGroup(
-      map,
-      state.tokens.filter((t) => t.side !== 'party'),
-      exit && exit.kind === 'stairs' ? exit.at : startPoint(map),
-      relocated,
-    ).map((t) => (t.behavior === 'guard' ? { ...t, home: t.position } : t));
-    setState({ mapId: map.id, tokens: [...relocated, ...others] });
-  }
-  const tokens = state.tokens;
+/**
+ * Movement, turns and combat on one map. Tokens belong to the campaign (they
+ * can be on any map); this hook works with the ones on `map`.
+ */
+export function useEncounter(map: DungeonMap, allTokens: Token[], setAllTokens: (fn: (ts: Token[]) => Token[]) => void, requestDraw: () => void, opts: EncounterOptions): Encounter {
+  const tokens = useMemo(() => allTokens.filter((t) => t.mapId === map.id), [allTokens, map.id]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [spent, setSpent] = useState<Record<string, number>>({});
   const [history, setHistory] = useState<MoveRecord[]>([]);
   const [busy, setBusy] = useState(false);
   const [round, setRound] = useState(1);
   const [combat, setCombat] = useState<{ order: InitiativeEntry[]; turn: number } | null>(null);
+  // Changing maps ends any fight and clears the turn state.
+  const [onMap, setOnMap] = useState(map.id);
+  if (onMap !== map.id) {
+    setOnMap(map.id);
+    setSelectedId(null);
+    setSpent({});
+    setHistory([]);
+    setCombat(null);
+  }
   const animating = useRef<{ id: string; pos: Point } | null>(null);
   const policy = opts.policy;
 
@@ -152,7 +119,7 @@ export function useEncounter(map: DungeonMap, requestDraw: () => void, opts: Enc
     [reach, selected, remaining],
   );
 
-  const setTokens = (fn: (ts: Token[]) => Token[]) => setState((s) => ({ ...s, tokens: fn(s.tokens) }));
+  const setTokens = setAllTokens;
 
   const moveTo = (target: Point, override: boolean): string | null => {
     if (!selected || busy) return null;
