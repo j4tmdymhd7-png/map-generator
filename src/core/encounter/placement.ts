@@ -1,8 +1,8 @@
 import { idx, ORTHOGONAL, rectCenter } from '../model/grid';
 import type { DungeonMap, Point, RoomObject, Size, Token } from '../model/types';
 import { footprintSquares } from '../rules/dnd2024';
+import { isStandable, isWalkable } from '../model/terrain';
 
-const STANDABLE = new Set(['floor', 'stairs']);
 
 function footprintFree(map: DungeonMap, x: number, y: number, s: number, taken: Set<number>): boolean {
   for (let dy = 0; dy < s; dy++)
@@ -11,7 +11,7 @@ function footprintFree(map: DungeonMap, x: number, y: number, s: number, taken: 
         cy = y + dy;
       if (cx < 0 || cy < 0 || cx >= map.width || cy >= map.height) return false;
       const i = idx(map, cx, cy);
-      if (!STANDABLE.has(map.terrain[i]) || taken.has(i)) return false;
+      if (!isStandable(map.terrain[i]) || taken.has(i)) return false;
     }
   return true;
 }
@@ -47,7 +47,7 @@ export function findFreeSpot(map: DungeonMap, near: Point, size: Size, taken: Se
       if (nx < 0 || ny < 0 || nx >= map.width || ny >= map.height) continue;
       const i = idx(map, nx, ny);
       const t = map.terrain[i];
-      if (seen[i] || !(STANDABLE.has(t) || t === 'door')) continue;
+      if (seen[i] || !(isStandable(t) || t === 'door' || (isWalkable(t) && t !== 'pit' && t !== 'hazard'))) continue;
       seen[i] = 1;
       queue.push({ x: nx, y: ny });
     }
@@ -57,6 +57,7 @@ export function findFreeSpot(map: DungeonMap, near: Point, size: Size, taken: Se
 
 /** Where the party starts: the entrance stairs, else the first room's center. */
 export function startPoint(map: DungeonMap): Point {
+  if (map.spawn) return map.spawn;
   const entrance = map.objects.find((o) => o.kind === 'stairs' && o.role === 'entrance');
   if (entrance && entrance.kind === 'stairs') return entrance.at;
   const room = map.objects.find((o): o is RoomObject => o.kind === 'room');

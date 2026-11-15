@@ -5,7 +5,7 @@ import { LootPanel } from './encounter/LootPanel';
 import { LibraryDialog } from './library/LibraryDialog';
 import { useLibrary } from './library/useLibrary';
 import { wanderAll } from './core/encounter/wander';
-import { generateDungeon, type Theme } from './core/generator/generate';
+import { generateMap, MAP_SIZES, SIZE_INFO, type MapKind, type MapSize } from './core/generator/maps';
 import { idx } from './core/model/grid';
 import type { DoorState, DungeonMap, GridPolicy, ItemStack, LootObject, Point, Token } from './core/model/types';
 import { footprintSquares } from './core/rules/dnd2024';
@@ -56,7 +56,8 @@ function footprint(t: Token, p: Point): Point[] {
 
 export default function App() {
   const [seed, setSeed] = useState('goblin-warren');
-  const [theme, setTheme] = useState<Theme>('dungeon');
+  const [size, setSize] = useState<MapSize>('medium');
+  const [kind, setKind] = useState<MapKind>('dungeon');
   const [showGrid, setShowGrid] = useState(true);
   const [roomNumbers, setRoomNumbers] = useState(true);
   const [hover, setHover] = useState<Point | null>(null);
@@ -77,7 +78,7 @@ export default function App() {
 
   // The generated map plus live edits (doors, loot) layered on top. Each new
   // map is stocked with loot from the item library.
-  const generated = useMemo(() => generateDungeon(seed, { theme }), [seed, theme]);
+  const generated = useMemo(() => generateMap(seed, size, kind), [seed, size, kind]);
   const stock = (m: DungeonMap, rngSeed: string, used: Set<string>): DungeonMap => ({
     ...m,
     objects: [...m.objects.filter((o) => o.kind !== 'loot'), ...stockDungeon(m, createRng(rngSeed), lib.items, partyLevel, used)],
@@ -348,7 +349,7 @@ export default function App() {
   const turnPrefix = activeToken ? `${activeToken.label}'s turn · ` : '';
   const hint = enc.selected
     ? `${turnPrefix}${enc.selected.label} selected · ${enc.remaining(enc.selected)} ft left · click a square to move, O to open/close an adjacent door, Esc to deselect`
-    : `${turnPrefix}${rooms} rooms · ${lootObjects.length} chests · N for ${enc.combat ? 'next turn' : 'next round'} · click a token to select it · click a door to open or close it (Shift-click to lock)`;
+    : `${turnPrefix}${map.width}×${map.height} · ${rooms} ${map.style === 'outdoor' ? 'places' : 'rooms'} · ${lootObjects.length} chests · N for ${enc.combat ? 'next turn' : 'next round'} · click a token to select it · click a door to open or close it (Shift-click to lock)`;
 
   return (
     <div className="app">
@@ -364,11 +365,33 @@ export default function App() {
         <button type="button" onClick={() => setSeed(randomSeed())}>
           New random seed
         </button>
+        <label title={SIZE_INFO[size].blurb}>
+          Size{' '}
+          <select
+            value={size}
+            onChange={(e) => {
+              const next = e.target.value as MapSize;
+              setSize(next);
+              setKind(SIZE_INFO[next].kinds[0].kind);
+              // Outdoors you can see much farther than down a corridor.
+              setSightFt(next === 'huge' || next === 'gargantuan' ? 120 : 60);
+            }}
+          >
+            {MAP_SIZES.map((s) => (
+              <option key={s} value={s}>
+                {SIZE_INFO[s].label}
+              </option>
+            ))}
+          </select>
+        </label>
         <label>
-          Theme{' '}
-          <select value={theme} onChange={(e) => setTheme(e.target.value as Theme)}>
-            <option value="dungeon">Dungeon</option>
-            <option value="cave">Caves</option>
+          Type{' '}
+          <select value={kind} onChange={(e) => setKind(e.target.value as MapKind)}>
+            {SIZE_INFO[size].kinds.map((k) => (
+              <option key={k.kind} value={k.kind}>
+                {k.label}
+              </option>
+            ))}
           </select>
         </label>
         <label className="check">
@@ -453,7 +476,7 @@ export default function App() {
             <label>
               Party sight
               <select value={sightFt} onChange={(e) => setSightFt(Number(e.target.value))}>
-                {[30, 60, 90, 120].map((ft) => (
+                {[30, 60, 90, 120, 240].map((ft) => (
                   <option key={ft} value={ft}>
                     {ft} ft
                   </option>

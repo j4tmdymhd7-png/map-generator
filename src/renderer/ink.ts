@@ -1,21 +1,22 @@
 /**
- * Pen-and-ink dungeon renderer.
+ * Pen-and-ink map renderer.
  *
- * Draws a map onto a 2D canvas context in grid units scaled by `cell` pixels.
- * All hand-drawn wobble comes from a PRNG seeded by the map, in grid units,
- * so the same map looks identical at every zoom level and on every redraw.
+ * Draws any rectangle of a map (a tile) onto a 2D canvas, in grid units
+ * scaled by `cell` pixels. Every bit of hand-drawn wobble comes from a hash of
+ * the map seed and the square (or wall stroke) being drawn, so any tile, at
+ * any zoom, draws exactly the same as its neighbours and as the whole map.
  *
  * The look is monochrome on purpose: meaning is carried by line, pattern and
  * symbol, never by hue.
  */
 import { idx, isDifficult, terrainAt } from '../core/model/grid';
-import type { DoorState, DungeonMap, LootObject, RoomObject } from '../core/model/types';
-import { createRng, type Rng } from '../core/rng';
+import type { DoorState, DungeonMap, FurnitureObject, LootObject, MapStyle, RoomObject, Terrain } from '../core/model/types';
 import { doorOrientation, isOpenAt, rockDistance, wallSegments, type Segment } from './geometry';
 
 export const INK = {
   paper: '#f2e8cf',
   floor: '#fbf6e8',
+  road: '#ece2c8',
   ink: '#2a241f',
   shadow: 'rgba(42, 36, 31, 0.10)',
   grid: 'rgba(42, 36, 31, 0.16)',
@@ -29,24 +30,125 @@ export interface InkOptions {
   roomNumbers: boolean;
 }
 
-type Ctx = CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D;
+/** Squares [x0, x1) × [y0, y1). */
+export interface Region {
+  x0: number;
+  y0: number;
+  x1: number;
+  y1: number;
+}
 
-function seedFor(map: DungeonMap): string {
-  return `ink:${map.generation?.seed ?? map.id}`;
+type Ctx = CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D;
+type R = () => number;
+
+// ---------------------------------------------------------------------------
+// Deterministic per-square randomness
+
+function hashString(s: string): number {
+  let h = 2166136261;
+  for (let i = 0; i < s.length; i++) h = Math.imul(h ^ s.charCodeAt(i), 16777619);
+  return h >>> 0;
+}
+
+/** A small PRNG (mulberry32) seeded from the map seed, a salt and a position. */
+function rngAt(seed: number, salt: number, x: number, y: number): R {
+  let a = (seed ^ Math.imul(salt + 1, 0x9e3779b1) ^ Math.imul(x + 7919, 0x85ebca6b) ^ Math.imul(y + 104729, 0xc2b2ae35)) >>> 0;
+  return () => {
+    a = (a + 0x6d2b79f5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+const SALT = { paper: 1, hatch: 2, wall: 3, rubble: 4, brush: 5, grass: 6, road: 7, water: 8, tree: 9 } as const;
+
+// ---------------------------------------------------------------------------
+// Per-map data, computed once
+
+interface Pre {
+  seed: number;
+  style: MapStyle;
+  segments: Segment[];
+  roadEdges: Segment[];
+  rockDist: Uint8Array;
+  doors: Map<number, DoorState>;
+  furnitureCells: Set<number>;
+  furniture: FurnitureObject[];
+  loot: LootObject[];
+  rooms: RoomObject[];
+}
+
+const preCache = new WeakMap<DungeonMap, Pre>();
+
+/** Lines along the edge between two kinds of squares, merged into long runs. */
+function edgeSegments(map: DungeonMap, inside: (t: Terrain) => boolean, outside: (t: Terrain) => boolean): Segment[] {
+  const out: Segment[] = [];
+  const edgeAt = (a: Terrain, b: Terrain) => (inside(a) && outside(b)) || (inside(b) && outside(a));
+  for (let y = 1; y < map.height; y++) {
+    let run = -1;
+    for (let x = 0; x <= map.width; x++) {
+      const e = x < map.width && edgeAt(terrainAt(map, x, y - 1), terrainAt(map, x, y));
+      if (e && run < 0) run = x;
+      if (!e && run >= 0) {
+        out.push({ x1: run, y1: y, x2: x, y2: y });
+        run = -1;
+      }
+    }
+  }
+  for (let x = 1; x < map.width; x++) {
+    let run = -1;
+    for (let y = 0; y <= map.height; y++) {
+      const e = y < map.height && edgeAt(terrainAt(map, x - 1, y), terrainAt(map, x, y));
+      if (e && run < 0) run = y;
+      if (!e && run >= 0) {
+        out.push({ x1: x, y1: run, x2: x, y2: y });
+        run = -1;
+      }
+    }
+  }
+  return out;
+}
+
+function pre(map: DungeonMap): Pre {
+  let p = preCache.get(map);
+  if (p) return p;
+  const furniture = map.objects.filter((o): o is FurnitureObject => o.kind === 'furniture');
+  const furnitureCells = new Set<number>();
+  for (const f of furniture)
+    for (let y = f.rect.y; y < f.rect.y + f.rect.h; y++) for (let x = f.rect.x; x < f.rect.x + f.rect.w; x++) furnitureCells.add(idx(map, x, y));
+  const doors = new Map<number, DoorState>();
+  for (const o of map.objects) if (o.kind === 'door') doors.set(idx(map, o.at.x, o.at.y), o.state);
+  const style = map.style ?? 'dungeon';
+  const ground = (t: Terrain) => t === 'ground' || t === 'brush' || t === 'tree';
+  p = {
+    seed: hashString(`ink:${map.generation?.seed ?? map.id}`),
+    style,
+    segments: wallSegments(map),
+    roadEdges: style === 'outdoor' ? edgeSegments(map, (t) => t === 'road', ground) : [],
+    rockDist: rockDistance(map, 3),
+    doors,
+    furnitureCells,
+    furniture,
+    loot: map.objects.filter((o): o is LootObject => o.kind === 'loot'),
+    rooms: map.objects.filter((o): o is RoomObject => o.kind === 'room' && o.visibility === 'public'),
+  };
+  preCache.set(map, p);
+  return p;
 }
 
 /** A slightly wobbly pen stroke from (x1,y1) to (x2,y2), in pixels. */
-function penLine(ctx: Ctx, rng: Rng, x1: number, y1: number, x2: number, y2: number, wobble: number) {
+function penLine(ctx: Ctx, rng: R, x1: number, y1: number, x2: number, y2: number, wobble: number) {
   const len = Math.hypot(x2 - x1, y2 - y1);
   const steps = Math.max(1, Math.round(len / (wobble * 40)));
   const nx = -(y2 - y1) / len,
     ny = (x2 - x1) / len;
-  ctx.moveTo(x1 + (rng.next() - 0.5) * wobble, y1 + (rng.next() - 0.5) * wobble);
+  ctx.moveTo(x1 + (rng() - 0.5) * wobble, y1 + (rng() - 0.5) * wobble);
   let px = x1,
     py = y1;
   for (let i = 1; i <= steps; i++) {
     const t = i / steps;
-    const off = i === steps ? 0 : (rng.next() - 0.5) * wobble;
+    const off = i === steps ? 0 : (rng() - 0.5) * wobble;
     const qx = x1 + (x2 - x1) * t + nx * off;
     const qy = y1 + (y2 - y1) * t + ny * off;
     ctx.quadraticCurveTo(px, py, (px + qx) / 2, (py + qy) / 2);
@@ -56,94 +158,106 @@ function penLine(ctx: Ctx, rng: Rng, x1: number, y1: number, x2: number, y2: num
   }
 }
 
-function drawPaper(ctx: Ctx, map: DungeonMap, c: number, rng: Rng) {
-  const w = map.width * c,
-    h = map.height * c;
-  ctx.fillStyle = INK.paper;
-  ctx.fillRect(0, 0, w, h);
-  // Faint mottling so the paper isn't flat.
-  // Fine fibres/speckle rather than blotches, so it reads as paper grain.
-  const specks = map.width * map.height * 3;
-  for (let i = 0; i < specks; i++) {
-    ctx.fillStyle = `rgba(110, 85, 50, ${0.04 + rng.next() * 0.06})`;
-    const r = c * (0.015 + rng.next() * 0.03);
-    ctx.fillRect(rng.next() * w, rng.next() * h, r, r);
-  }
+const segRng = (p: Pre, g: Segment) => rngAt(p.seed, SALT.wall, g.x1 * 1009 + g.x2, g.y1 * 1013 + g.y2);
+const segIn = (g: Segment, r: Region) => g.x2 >= r.x0 - 1 && g.x1 <= r.x1 + 1 && g.y2 >= r.y0 - 1 && g.y1 <= r.y1 + 1;
+
+// ---------------------------------------------------------------------------
+// Layers
+
+function forCells(map: DungeonMap, r: Region, margin: number, fn: (x: number, y: number, i: number) => void) {
+  const x0 = Math.max(0, r.x0 - margin),
+    y0 = Math.max(0, r.y0 - margin),
+    x1 = Math.min(map.width, r.x1 + margin),
+    y1 = Math.min(map.height, r.y1 + margin);
+  for (let y = y0; y < y1; y++) for (let x = x0; x < x1; x++) fn(x, y, idx(map, x, y));
 }
 
-/** Crosshatch clusters in the rock that hugs the outside of the walls. */
-function drawHatching(ctx: Ctx, map: DungeonMap, c: number, rng: Rng) {
-  const dist = rockDistance(map, 3);
-  const keep = [0, 1, 0.6, 0.18];
-  ctx.strokeStyle = INK.hatch;
+function drawPaper(ctx: Ctx, map: DungeonMap, p: Pre, c: number, r: Region) {
+  ctx.fillStyle = INK.paper;
+  ctx.fillRect(r.x0 * c, r.y0 * c, (r.x1 - r.x0) * c, (r.y1 - r.y0) * c);
+  forCells(map, r, 0, (x, y) => {
+    const rng = rngAt(p.seed, SALT.paper, x, y);
+    for (let k = 0; k < 3; k++) {
+      ctx.fillStyle = `rgba(110, 85, 50, ${0.04 + rng() * 0.06})`;
+      const s = c * (0.015 + rng() * 0.03);
+      ctx.fillRect((x + rng()) * c, (y + rng()) * c, s, s);
+    }
+  });
+}
+
+/** Crosshatch in the rock around walls (dungeons), on walls (interiors), and over whole buildings (outdoors). */
+function drawHatching(ctx: Ctx, map: DungeonMap, p: Pre, c: number, r: Region) {
+  const keep = p.style === 'dungeon' ? [0, 1, 0.6, 0.18, 0] : p.style === 'interior' ? [0, 1, 0, 0, 0] : [0, 1, 1, 1, 1];
+  ctx.strokeStyle = p.style === 'outdoor' ? 'rgba(42, 36, 31, 0.6)' : INK.hatch;
   ctx.lineWidth = Math.max(0.6, c * 0.035);
   ctx.lineCap = 'round';
-  for (let y = 0; y < map.height; y++) {
-    for (let x = 0; x < map.width; x++) {
-      const d = dist[idx(map, x, y)];
-      // Always roll, so the pattern doesn't shift when distances change elsewhere.
-      const roll = rng.next();
-      const angle = rng.next() * Math.PI;
-      const jx = (rng.next() - 0.5) * 0.4,
-        jy = (rng.next() - 0.5) * 0.4;
-      const strokes = 4 + Math.floor(rng.next() * 3);
-      if (d === 0 || d > 3 || roll > keep[d]) continue;
-
-      const cx = (x + 0.5 + jx) * c,
-        cy = (y + 0.5 + jy) * c;
-      const r = c * 0.68;
-      ctx.save();
-      ctx.beginPath();
-      ctx.arc(cx, cy, r, 0, Math.PI * 2);
-      ctx.clip();
-      const ux = Math.cos(angle),
-        uy = Math.sin(angle);
-      ctx.beginPath();
-      for (let s = 0; s < strokes; s++) {
-        const o = (s / (strokes - 1) - 0.5) * 2 * r * 0.85;
-        const sx = cx - uy * o,
-          sy = cy + ux * o;
-        ctx.moveTo(sx - ux * r, sy - uy * r);
-        ctx.lineTo(sx + ux * r, sy + uy * r);
-      }
-      ctx.stroke();
-      ctx.restore();
+  forCells(map, r, 1, (x, y, i) => {
+    const d = p.rockDist[i];
+    if (d === 0) return;
+    const rng = rngAt(p.seed, SALT.hatch, x, y);
+    if (rng() > keep[Math.min(d, 4)]) return;
+    const angle = rng() * Math.PI;
+    const jx = (rng() - 0.5) * 0.4,
+      jy = (rng() - 0.5) * 0.4;
+    const strokes = 4 + Math.floor(rng() * 3);
+    const cx = (x + 0.5 + jx) * c,
+      cy = (y + 0.5 + jy) * c;
+    const rad = c * 0.68;
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(cx, cy, rad, 0, Math.PI * 2);
+    ctx.clip();
+    const ux = Math.cos(angle),
+      uy = Math.sin(angle);
+    ctx.beginPath();
+    for (let s = 0; s < strokes; s++) {
+      const o = (s / (strokes - 1) - 0.5) * 2 * rad * 0.85;
+      const sx = cx - uy * o,
+        sy = cy + ux * o;
+      ctx.moveTo(sx - ux * rad, sy - uy * rad);
+      ctx.lineTo(sx + ux * rad, sy + uy * rad);
     }
-  }
+    ctx.stroke();
+    ctx.restore();
+  });
 }
 
-function openCellsPath(map: DungeonMap, c: number): Path2D {
-  const p = new Path2D();
-  for (let y = 0; y < map.height; y++) {
+function drawFloor(ctx: Ctx, map: DungeonMap, p: Pre, c: number, r: Region, grid: boolean) {
+  // Open squares in this region, as one path (rows of runs).
+  const open = new Path2D();
+  for (let y = Math.max(0, r.y0 - 1); y < Math.min(map.height, r.y1 + 1); y++) {
     let start = -1;
-    for (let x = 0; x <= map.width; x++) {
-      const open = x < map.width && isOpenAt(map, x, y);
-      if (open && start < 0) start = x;
-      if (!open && start >= 0) {
-        p.rect(start * c, y * c, (x - start) * c, c);
+    for (let x = Math.max(0, r.x0 - 1); x <= Math.min(map.width, r.x1 + 1); x++) {
+      const o = x < Math.min(map.width, r.x1 + 1) && isOpenAt(map, x, y);
+      if (o && start < 0) start = x;
+      if (!o && start >= 0) {
+        open.rect(start * c, y * c, (x - start) * c, c);
         start = -1;
       }
     }
   }
-  return p;
-}
-
-function drawFloor(ctx: Ctx, map: DungeonMap, c: number, open: Path2D, segments: Segment[], grid: boolean) {
   ctx.fillStyle = INK.floor;
   ctx.fill(open);
-
   ctx.save();
   ctx.clip(open);
+  // Roads are a shade darker than open ground.
+  if (p.style !== 'dungeon') {
+    ctx.fillStyle = INK.road;
+    forCells(map, r, 1, (x, y, i) => {
+      if (map.terrain[i] === 'road') ctx.fillRect(x * c, y * c, c, c);
+    });
+  }
   // Soft shadow inside every wall.
   ctx.fillStyle = INK.shadow;
   const s = c * 0.16;
-  for (const g of segments) {
+  for (const g of p.segments) {
+    if (!segIn(g, r)) continue;
     if (g.y1 === g.y2) {
-      const floorBelow = isOpenAt(map, g.x1, g.y1);
-      ctx.fillRect(g.x1 * c, floorBelow ? g.y1 * c : g.y1 * c - s, (g.x2 - g.x1) * c, s);
+      const below = isOpenAt(map, g.x1, g.y1);
+      ctx.fillRect(g.x1 * c, below ? g.y1 * c : g.y1 * c - s, (g.x2 - g.x1) * c, s);
     } else {
-      const floorRight = isOpenAt(map, g.x1, g.y1);
-      ctx.fillRect(floorRight ? g.x1 * c : g.x1 * c - s, g.y1 * c, s, (g.y2 - g.y1) * c);
+      const right = isOpenAt(map, g.x1, g.y1);
+      ctx.fillRect(right ? g.x1 * c : g.x1 * c - s, g.y1 * c, s, (g.y2 - g.y1) * c);
     }
   }
   if (grid) {
@@ -151,13 +265,13 @@ function drawFloor(ctx: Ctx, map: DungeonMap, c: number, open: Path2D, segments:
     ctx.lineWidth = Math.max(0.5, c * 0.025);
     ctx.setLineDash([c * 0.12, c * 0.1]);
     ctx.beginPath();
-    for (let x = 0; x <= map.width; x++) {
-      ctx.moveTo(x * c, 0);
-      ctx.lineTo(x * c, map.height * c);
+    for (let x = r.x0; x <= r.x1; x++) {
+      ctx.moveTo(x * c, r.y0 * c);
+      ctx.lineTo(x * c, r.y1 * c);
     }
-    for (let y = 0; y <= map.height; y++) {
-      ctx.moveTo(0, y * c);
-      ctx.lineTo(map.width * c, y * c);
+    for (let y = r.y0; y <= r.y1; y++) {
+      ctx.moveTo(r.x0 * c, y * c);
+      ctx.lineTo(r.x1 * c, y * c);
     }
     ctx.stroke();
     ctx.setLineDash([]);
@@ -165,24 +279,308 @@ function drawFloor(ctx: Ctx, map: DungeonMap, c: number, open: Path2D, segments:
   ctx.restore();
 }
 
-function drawWalls(ctx: Ctx, c: number, segments: Segment[], rng: Rng) {
+function drawWalls(ctx: Ctx, p: Pre, c: number, r: Region) {
   ctx.strokeStyle = INK.ink;
   ctx.lineCap = 'round';
   ctx.lineJoin = 'round';
   // Main stroke, then a thin offset pass for an inked, slightly doubled edge.
-  for (const [width, alpha] of [
-    [0.11, 1],
-    [0.04, 0.45],
+  for (const [width, alpha, pass] of [
+    [0.11, 1, 0],
+    [0.04, 0.45, 1],
   ] as const) {
     ctx.globalAlpha = alpha;
     ctx.lineWidth = Math.max(1, c * width);
     ctx.beginPath();
-    for (const g of segments) penLine(ctx, rng, g.x1 * c, g.y1 * c, g.x2 * c, g.y2 * c, c * 0.05);
+    for (const g of p.segments) {
+      if (!segIn(g, r)) continue;
+      const rng = segRng(p, g);
+      if (pass === 1) for (let k = 0; k < 64; k++) rng(); // a different wobble for the second pass
+      penLine(ctx, rng, g.x1 * c, g.y1 * c, g.x2 * c, g.y2 * c, c * 0.05);
+    }
     ctx.stroke();
   }
   ctx.globalAlpha = 1;
 }
 
+function drawRoadEdges(ctx: Ctx, p: Pre, c: number, r: Region) {
+  if (!p.roadEdges.length) return;
+  ctx.strokeStyle = 'rgba(42, 36, 31, 0.55)';
+  ctx.lineWidth = Math.max(0.7, c * 0.035);
+  ctx.setLineDash([c * 0.22, c * 0.12]);
+  ctx.beginPath();
+  for (const g of p.roadEdges) {
+    if (!segIn(g, r)) continue;
+    penLine(ctx, segRng(p, g), g.x1 * c, g.y1 * c, g.x2 * c, g.y2 * c, c * 0.06);
+  }
+  ctx.stroke();
+  ctx.setLineDash([]);
+}
+
+// ---------------------------------------------------------------------------
+// Terrain details
+
+/** Stippled rubble for Difficult Terrain. */
+function drawRubble(ctx: Ctx, x: number, y: number, c: number, rng: R) {
+  ctx.fillStyle = INK.ink;
+  ctx.strokeStyle = INK.ink;
+  ctx.lineWidth = Math.max(0.6, c * 0.03);
+  for (let i = 0; i < 9; i++) {
+    ctx.beginPath();
+    ctx.arc((x + 0.12 + rng() * 0.76) * c, (y + 0.12 + rng() * 0.76) * c, c * 0.025, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  for (let i = 0; i < 3; i++) {
+    const rx = (x + 0.2 + rng() * 0.6) * c,
+      ry = (y + 0.2 + rng() * 0.6) * c;
+    const rad = c * (0.06 + rng() * 0.05);
+    ctx.beginPath();
+    for (let k = 0; k < 6; k++) {
+      const a = (k / 6) * Math.PI * 2;
+      const rr = rad * (0.75 + rng() * 0.5);
+      if (k === 0) ctx.moveTo(rx + Math.cos(a) * rr, ry + Math.sin(a) * rr);
+      else ctx.lineTo(rx + Math.cos(a) * rr, ry + Math.sin(a) * rr);
+    }
+    ctx.closePath();
+    ctx.stroke();
+  }
+}
+
+/** A few tufts of undergrowth: curved blades fanning up from the ground. */
+function drawBrush(ctx: Ctx, x: number, y: number, c: number, rng: R) {
+  ctx.strokeStyle = 'rgba(42, 36, 31, 0.8)';
+  ctx.lineWidth = Math.max(0.7, c * 0.035);
+  ctx.lineCap = 'round';
+  ctx.beginPath();
+  const tufts = 2 + Math.floor(rng() * 2);
+  for (let t = 0; t < tufts; t++) {
+    const bx = (x + 0.2 + rng() * 0.6) * c,
+      by = (y + 0.5 + rng() * 0.35) * c;
+    for (let k = -2; k <= 2; k++) {
+      const h = c * (0.16 + (2 - Math.abs(k)) * 0.04 + rng() * 0.04);
+      ctx.moveTo(bx + k * c * 0.02, by);
+      ctx.quadraticCurveTo(bx + k * c * 0.03, by - h * 0.7, bx + k * c * 0.08, by - h);
+    }
+  }
+  ctx.stroke();
+}
+
+function drawGrass(ctx: Ctx, x: number, y: number, c: number, rng: R) {
+  if (rng() > 0.18) return;
+  ctx.strokeStyle = 'rgba(42, 36, 31, 0.55)';
+  ctx.lineWidth = Math.max(0.6, c * 0.03);
+  ctx.beginPath();
+  const bx = (x + 0.2 + rng() * 0.6) * c,
+    by = (y + 0.3 + rng() * 0.5) * c;
+  ctx.moveTo(bx - c * 0.07, by - c * 0.1);
+  ctx.lineTo(bx, by);
+  ctx.lineTo(bx + c * 0.07, by - c * 0.12);
+  ctx.stroke();
+}
+
+function drawRoadPebbles(ctx: Ctx, x: number, y: number, c: number, rng: R) {
+  if (rng() > 0.35) return;
+  ctx.strokeStyle = 'rgba(42, 36, 31, 0.4)';
+  ctx.lineWidth = Math.max(0.5, c * 0.025);
+  ctx.beginPath();
+  ctx.ellipse((x + 0.2 + rng() * 0.6) * c, (y + 0.2 + rng() * 0.6) * c, c * 0.07, c * 0.045, rng() * Math.PI, 0, Math.PI * 2);
+  ctx.stroke();
+}
+
+function drawWater(ctx: Ctx, x: number, y: number, deep: boolean, c: number, rng: R) {
+  ctx.fillStyle = deep ? 'rgba(42, 36, 31, 0.2)' : 'rgba(42, 36, 31, 0.07)';
+  ctx.fillRect(x * c, y * c, c, c);
+  ctx.strokeStyle = deep ? 'rgba(42, 36, 31, 0.75)' : 'rgba(42, 36, 31, 0.55)';
+  ctx.lineWidth = Math.max(0.6, c * 0.035);
+  ctx.beginPath();
+  const lines = deep ? 3 : 2;
+  for (let k = 0; k < lines; k++) {
+    const yy = (y + (k + 0.5) / lines + (rng() - 0.5) * 0.1) * c;
+    const x0 = (x + 0.08 + rng() * 0.2) * c,
+      w = c * (0.45 + rng() * 0.25);
+    ctx.moveTo(x0, yy);
+    ctx.bezierCurveTo(x0 + w * 0.25, yy - c * 0.08, x0 + w * 0.5, yy + c * 0.08, x0 + w * 0.75, yy);
+    ctx.quadraticCurveTo(x0 + w * 0.875, yy - c * 0.04, x0 + w, yy);
+  }
+  ctx.stroke();
+}
+
+/** A tree from above: a lobed canopy with a soft shadow. */
+function drawTree(ctx: Ctx, x: number, y: number, c: number, rng: R) {
+  const cx = (x + 0.5 + (rng() - 0.5) * 0.25) * c,
+    cy = (y + 0.5 + (rng() - 0.5) * 0.25) * c;
+  const rad = c * (0.55 + rng() * 0.12);
+  const lobes = 7 + Math.floor(rng() * 3);
+  const ph = rng() * Math.PI * 2;
+  const canopy = () => {
+    ctx.beginPath();
+    for (let k = 0; k <= lobes; k++) {
+      const a = ph + (k / lobes) * Math.PI * 2;
+      const a2 = ph + ((k + 0.5) / lobes) * Math.PI * 2;
+      const px = cx + Math.cos(a) * rad * 0.82,
+        py = cy + Math.sin(a) * rad * 0.82;
+      if (k === 0) ctx.moveTo(px, py);
+      else ctx.quadraticCurveTo(cx + Math.cos(a2 - Math.PI / lobes) * rad * 1.08, cy + Math.sin(a2 - Math.PI / lobes) * rad * 1.08, px, py);
+    }
+    ctx.closePath();
+  };
+  ctx.save();
+  ctx.translate(c * 0.08, c * 0.1);
+  canopy();
+  ctx.fillStyle = 'rgba(42, 36, 31, 0.18)';
+  ctx.fill();
+  ctx.restore();
+  canopy();
+  ctx.fillStyle = INK.floor;
+  ctx.fill();
+  ctx.strokeStyle = INK.ink;
+  ctx.lineWidth = Math.max(0.8, c * 0.05);
+  ctx.stroke();
+  // Shading on the lower-right of the canopy, and a dot for the trunk.
+  ctx.lineWidth = Math.max(0.5, c * 0.03);
+  ctx.beginPath();
+  const a0 = 0.15 + rng() * 0.3;
+  ctx.arc(cx, cy, rad * 0.62, a0, a0 + 1.4);
+  ctx.stroke();
+  ctx.fillStyle = INK.ink;
+  ctx.beginPath();
+  ctx.arc(cx, cy, Math.max(0.8, c * 0.045), 0, Math.PI * 2);
+  ctx.fill();
+}
+
+function drawFurniture(ctx: Ctx, f: FurnitureObject, c: number) {
+  const { x, y, w, h } = f.rect;
+  const px = x * c,
+    py = y * c,
+    pw = w * c,
+    ph = h * c;
+  ctx.save();
+  ctx.strokeStyle = INK.ink;
+  ctx.fillStyle = INK.floor;
+  ctx.lineWidth = Math.max(1, c * 0.05);
+  const box = (i: number) => {
+    ctx.beginPath();
+    ctx.rect(px + i * c, py + i * c, pw - 2 * i * c, ph - 2 * i * c);
+    ctx.fill();
+    ctx.stroke();
+  };
+  const horizontal = w >= h;
+  switch (f.type) {
+    case 'table': {
+      box(0.14);
+      ctx.lineWidth = Math.max(0.5, c * 0.025);
+      ctx.beginPath();
+      for (let k = 1; k < 3; k++) {
+        if (horizontal) {
+          ctx.moveTo(px + 0.14 * c, py + 0.14 * c + ((ph - 0.28 * c) * k) / 3);
+          ctx.lineTo(px + pw - 0.14 * c, py + 0.14 * c + ((ph - 0.28 * c) * k) / 3);
+        } else {
+          ctx.moveTo(px + 0.14 * c + ((pw - 0.28 * c) * k) / 3, py + 0.14 * c);
+          ctx.lineTo(px + 0.14 * c + ((pw - 0.28 * c) * k) / 3, py + ph - 0.14 * c);
+        }
+      }
+      ctx.stroke();
+      break;
+    }
+    case 'bed': {
+      box(0.1);
+      ctx.beginPath();
+      if (horizontal) ctx.rect(px + 0.16 * c, py + 0.18 * c, 0.4 * c, ph - 0.36 * c);
+      else ctx.rect(px + 0.18 * c, py + 0.16 * c, pw - 0.36 * c, 0.4 * c);
+      ctx.stroke();
+      ctx.beginPath();
+      if (horizontal) {
+        ctx.moveTo(px + 0.75 * c, py + 0.1 * c);
+        ctx.lineTo(px + 0.75 * c, py + ph - 0.1 * c);
+      } else {
+        ctx.moveTo(px + 0.1 * c, py + 0.75 * c);
+        ctx.lineTo(px + pw - 0.1 * c, py + 0.75 * c);
+      }
+      ctx.stroke();
+      break;
+    }
+    case 'counter':
+    case 'shelf': {
+      box(f.type === 'counter' ? 0.08 : 0.12);
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(px + 0.12 * c, py + 0.12 * c, pw - 0.24 * c, ph - 0.24 * c);
+      ctx.clip();
+      ctx.lineWidth = Math.max(0.5, c * 0.025);
+      ctx.beginPath();
+      if (f.type === 'counter') {
+        for (let k = -ph; k < pw; k += c * 0.16) {
+          ctx.moveTo(px + k, py + ph);
+          ctx.lineTo(px + k + ph, py);
+        }
+      } else if (horizontal) {
+        ctx.moveTo(px, py + ph / 2);
+        ctx.lineTo(px + pw, py + ph / 2);
+      } else {
+        ctx.moveTo(px + pw / 2, py);
+        ctx.lineTo(px + pw / 2, py + ph);
+      }
+      ctx.stroke();
+      ctx.restore();
+      break;
+    }
+    case 'barrel': {
+      const cx = px + pw / 2,
+        cy = py + ph / 2;
+      ctx.beginPath();
+      ctx.arc(cx, cy, c * 0.34, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+      ctx.lineWidth = Math.max(0.5, c * 0.025);
+      ctx.beginPath();
+      ctx.arc(cx, cy, c * 0.22, 0, Math.PI * 2);
+      ctx.stroke();
+      break;
+    }
+    case 'hearth': {
+      box(0.06);
+      ctx.fillStyle = INK.ink;
+      const cx = px + pw / 2,
+        cy = py + ph / 2;
+      ctx.beginPath();
+      ctx.moveTo(cx - c * 0.18, cy + c * 0.18);
+      ctx.quadraticCurveTo(cx - c * 0.2, cy - c * 0.05, cx - c * 0.05, cy - c * 0.25);
+      ctx.quadraticCurveTo(cx - c * 0.02, cy - c * 0.05, cx + c * 0.06, cy - c * 0.12);
+      ctx.quadraticCurveTo(cx + c * 0.22, cy + c * 0.02, cx + c * 0.18, cy + c * 0.18);
+      ctx.closePath();
+      ctx.fill();
+      break;
+    }
+    case 'stall': {
+      box(0.08);
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(px + 0.08 * c, py + 0.08 * c, pw - 0.16 * c, ph - 0.16 * c);
+      ctx.clip();
+      ctx.fillStyle = 'rgba(42, 36, 31, 0.55)';
+      for (let k = 0; k < (horizontal ? w : h) * 4; k += 2) {
+        if (horizontal) ctx.fillRect(px + k * c * 0.25, py, c * 0.25, ph);
+        else ctx.fillRect(px, py + k * c * 0.25, pw, c * 0.25);
+      }
+      ctx.restore();
+      break;
+    }
+    case 'well': {
+      const cx = px + pw / 2,
+        cy = py + ph / 2;
+      ctx.lineWidth = Math.max(1.5, c * 0.08);
+      ctx.beginPath();
+      ctx.arc(cx, cy, c * 0.4, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+      ctx.fillStyle = 'rgba(42, 36, 31, 0.45)';
+      ctx.beginPath();
+      ctx.arc(cx, cy, c * 0.22, 0, Math.PI * 2);
+      ctx.fill();
+      break;
+    }
+  }
+  ctx.restore();
+}
 function drawDoor(ctx: Ctx, map: DungeonMap, x: number, y: number, state: DoorState, c: number) {
   const horizontal = doorOrientation(map, x, y) === 'horizontal';
   const cx = (x + 0.5) * c,
@@ -311,31 +709,6 @@ function drawPillar(ctx: Ctx, x: number, y: number, c: number) {
 }
 
 /** Stippled rubble for Difficult Terrain. */
-function drawRubble(ctx: Ctx, x: number, y: number, c: number, rng: Rng) {
-  ctx.fillStyle = INK.ink;
-  ctx.strokeStyle = INK.ink;
-  ctx.lineWidth = Math.max(0.6, c * 0.03);
-  for (let i = 0; i < 9; i++) {
-    ctx.beginPath();
-    ctx.arc((x + 0.12 + rng.next() * 0.76) * c, (y + 0.12 + rng.next() * 0.76) * c, c * 0.025, 0, Math.PI * 2);
-    ctx.fill();
-  }
-  for (let i = 0; i < 3; i++) {
-    const rx = (x + 0.2 + rng.next() * 0.6) * c,
-      ry = (y + 0.2 + rng.next() * 0.6) * c;
-    const r = c * (0.06 + rng.next() * 0.05);
-    ctx.beginPath();
-    for (let k = 0; k < 6; k++) {
-      const a = (k / 6) * Math.PI * 2;
-      const rr = r * (0.75 + rng.next() * 0.5);
-      if (k === 0) ctx.moveTo(rx + Math.cos(a) * rr, ry + Math.sin(a) * rr);
-      else ctx.lineTo(rx + Math.cos(a) * rr, ry + Math.sin(a) * rr);
-    }
-    ctx.closePath();
-    ctx.stroke();
-  }
-}
-
 /** A small inked chest; drawn with the lid thrown back once it's been emptied. */
 function drawLoot(ctx: Ctx, loot: LootObject, c: number) {
   const cx = (loot.at.x + 0.5) * c,
@@ -388,53 +761,64 @@ function drawLoot(ctx: Ctx, loot: LootObject, c: number) {
   ctx.restore();
 }
 
-function drawFeatures(ctx: Ctx, map: DungeonMap, c: number, rng: Rng) {
-  const doors = new Map<number, DoorState>();
-  for (const o of map.objects) if (o.kind === 'door') doors.set(idx(map, o.at.x, o.at.y), o.state);
 
-  for (let y = 0; y < map.height; y++) {
-    for (let x = 0; x < map.width; x++) {
-      const t = terrainAt(map, x, y);
-      if (isDifficult(map, x, y)) drawRubble(ctx, x, y, c, rng);
-      switch (t) {
-        case 'door':
-          drawDoor(ctx, map, x, y, doors.get(idx(map, x, y)) ?? 'closed', c);
-          break;
-        case 'stairs':
-          drawStairs(ctx, map, x, y, c);
-          break;
-        case 'pit':
-          drawPit(ctx, x, y, c);
-          break;
-        case 'hazard':
-          drawHazard(ctx, x, y, c);
-          break;
-        case 'obstacle':
-          drawPillar(ctx, x, y, c);
-          break;
-        default:
-          break;
-      }
+function drawFeatures(ctx: Ctx, map: DungeonMap, p: Pre, c: number, r: Region) {
+  // Ground-level texture first (it can spill a little into neighbouring squares).
+  forCells(map, r, 1, (x, y, i) => {
+    const t = map.terrain[i];
+    if (t === 'water' || t === 'deepwater') drawWater(ctx, x, y, t === 'deepwater', c, rngAt(p.seed, SALT.water, x, y));
+    else if (t === 'brush') drawBrush(ctx, x, y, c, rngAt(p.seed, SALT.brush, x, y));
+    else if (t === 'ground' && p.style !== 'dungeon') drawGrass(ctx, x, y, c, rngAt(p.seed, SALT.grass, x, y));
+    else if (t === 'road') drawRoadPebbles(ctx, x, y, c, rngAt(p.seed, SALT.road, x, y));
+    if (isDifficult(map, x, y) && !p.furnitureCells.has(i) && (t === 'floor' || t === 'ground' || t === 'road'))
+      drawRubble(ctx, x, y, c, rngAt(p.seed, SALT.rubble, x, y));
+  });
+  forCells(map, r, 0, (x, y, i) => {
+    switch (map.terrain[i]) {
+      case 'door':
+        drawDoor(ctx, map, x, y, p.doors.get(i) ?? 'closed', c);
+        break;
+      case 'stairs':
+        drawStairs(ctx, map, x, y, c);
+        break;
+      case 'pit':
+        drawPit(ctx, x, y, c);
+        break;
+      case 'hazard':
+        drawHazard(ctx, x, y, c);
+        break;
+      case 'obstacle':
+        drawPillar(ctx, x, y, c);
+        break;
+      default:
+        break;
     }
-  }
-  for (const o of map.objects) if (o.kind === 'loot') drawLoot(ctx, o, c);
+  });
+  for (const f of p.furniture) if (f.rect.x < r.x1 + 1 && f.rect.x + f.rect.w > r.x0 - 1 && f.rect.y < r.y1 + 1 && f.rect.y + f.rect.h > r.y0 - 1) drawFurniture(ctx, f, c);
+  for (const l of p.loot) if (l.at.x >= r.x0 - 1 && l.at.x <= r.x1 && l.at.y >= r.y0 - 1 && l.at.y <= r.y1) drawLoot(ctx, l, c);
 }
 
-function drawRoomNumbers(ctx: Ctx, map: DungeonMap, c: number) {
-  const rooms = map.objects.filter((o): o is RoomObject => o.kind === 'room' && o.visibility === 'public');
+function drawTrees(ctx: Ctx, map: DungeonMap, p: Pre, c: number, r: Region) {
+  forCells(map, r, 1, (x, y, i) => {
+    if (map.terrain[i] === 'tree') drawTree(ctx, x, y, c, rngAt(p.seed, SALT.tree, x, y));
+  });
+}
+
+function drawRoomNumbers(ctx: Ctx, map: DungeonMap, p: Pre, c: number, r: Region) {
   ctx.font = `italic bold ${Math.round(c * 0.62)}px Georgia, 'Palatino Linotype', serif`;
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
   ctx.lineJoin = 'round';
-  rooms.forEach((r, i) => {
-    const label = String(i + 1);
-    let cx = (r.rect.x + r.rect.w / 2) * c;
-    let cy = (r.rect.y + r.rect.h / 2) * c;
-    // Nudge off a stairs square so the number doesn't sit on top of it.
+  p.rooms.forEach((room, i) => {
+    let cx = (room.rect.x + room.rect.w / 2) * c;
+    let cy = (room.rect.y + room.rect.h / 2) * c;
     const sx = Math.floor(cx / c),
       sy = Math.floor(cy / c);
+    if (sx < r.x0 - 2 || sx > r.x1 + 1 || sy < r.y0 - 2 || sy > r.y1 + 1) return;
+    // Nudge off a stairs square so the number doesn't sit on top of it.
     if (terrainAt(map, sx, sy) === 'stairs') cy -= c * 0.9;
-    if (r.rect.w % 2 === 1) cx = (Math.floor(cx / c) + 0.5) * c;
+    if (room.rect.w % 2 === 1) cx = (Math.floor(cx / c) + 0.5) * c;
+    const label = String(i + 1);
     ctx.lineWidth = c * 0.18;
     ctx.strokeStyle = INK.floor;
     ctx.strokeText(label, cx, cy);
@@ -443,17 +827,29 @@ function drawRoomNumbers(ctx: Ctx, map: DungeonMap, c: number) {
   });
 }
 
+/**
+ * Draw the squares in `r` (and only those: the output is clipped to them).
+ * The context's origin must be the map's top-left corner, in pixels.
+ */
+export function drawInkRegion(ctx: Ctx, map: DungeonMap, opts: InkOptions, r: Region): void {
+  const c = opts.cell;
+  const p = pre(map);
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(r.x0 * c, r.y0 * c, (r.x1 - r.x0) * c, (r.y1 - r.y0) * c);
+  ctx.clip();
+  drawPaper(ctx, map, p, c, r);
+  drawHatching(ctx, map, p, c, r);
+  drawFloor(ctx, map, p, c, r, opts.grid);
+  drawRoadEdges(ctx, p, c, r);
+  drawFeatures(ctx, map, p, c, r);
+  drawWalls(ctx, p, c, r);
+  drawTrees(ctx, map, p, c, r);
+  if (opts.roomNumbers) drawRoomNumbers(ctx, map, p, c, r);
+  ctx.restore();
+}
+
 /** Draw the whole static map (everything that doesn't move during play). */
 export function drawInkMap(ctx: Ctx, map: DungeonMap, opts: InkOptions): void {
-  const c = opts.cell;
-  const segments = wallSegments(map);
-  const open = openCellsPath(map, c);
-  // Separate streams so toggling one layer never reshuffles another's wobble.
-  const seed = seedFor(map);
-  drawPaper(ctx, map, c, createRng(`${seed}:paper`));
-  drawHatching(ctx, map, c, createRng(`${seed}:hatch`));
-  drawFloor(ctx, map, c, open, segments, opts.grid);
-  drawFeatures(ctx, map, c, createRng(`${seed}:features`));
-  drawWalls(ctx, c, segments, createRng(`${seed}:walls`));
-  if (opts.roomNumbers) drawRoomNumbers(ctx, map, c);
+  drawInkRegion(ctx, map, opts, { x0: 0, y0: 0, x1: map.width, y1: map.height });
 }

@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { ABILITIES, BEHAVIORS, ITEM_CATEGORIES, RARITIES, ROOM_SHAPES, SCHEMA_VERSION, SIZES, TERRAINS, type Campaign } from './types';
+import { ABILITIES, BEHAVIORS, FURNITURE_TYPES, ITEM_CATEGORIES, RARITIES, ROOM_SHAPES, SCHEMA_VERSION, SIZES, TERRAINS, type Campaign } from './types';
 
 const point = z.object({ x: z.number().int(), y: z.number().int() });
 const rect = z.object({
@@ -35,6 +35,7 @@ const mapObject = z.discriminatedUnion('kind', [
     linkTo: z.object({ mapId: z.string(), objectId: z.string() }).optional(),
   }),
   z.object({ ...base, kind: z.literal('note'), at: point, text: z.string() }),
+  z.object({ ...base, kind: z.literal('furniture'), rect, type: z.enum(FURNITURE_TYPES) }),
   z.object({ ...base, kind: z.literal('loot'), at: point, container: z.enum(['chest', 'pile']), items: z.array(itemStackSchema) }),
 ]);
 
@@ -55,6 +56,8 @@ const dungeonMap = z
         params: z.record(z.string(), z.unknown()),
       })
       .optional(),
+    style: z.enum(['dungeon', 'interior', 'outdoor']).optional(),
+    spawn: point.optional(),
   })
   .superRefine((m, ctx) => {
     const n = m.width * m.height;

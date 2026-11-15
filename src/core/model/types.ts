@@ -16,6 +16,15 @@ export const TERRAINS = [
   'pit',
   'hazard',
   'obstacle', // opaque, fills its space (pillar, boulder)
+  // Outdoors
+  'ground', // open earth or grass
+  'road', // paved or packed road, trail
+  'tree', // trunk and canopy: blocks movement and sight
+  'brush', // undergrowth: difficult terrain
+  'water', // shallow water: difficult terrain
+  'deepwater', // too deep to wade: blocks walking (swim later)
+  // Interiors
+  'furniture', // counters, shelves, hearths: block movement, not sight
 ] as const;
 export type Terrain = (typeof TERRAINS)[number];
 
@@ -109,7 +118,20 @@ export interface LootObject extends BaseObject {
   items: ItemStack[];
 }
 
-export type MapObject = RoomObject | CorridorObject | DoorObject | StairsObject | NoteObject | LootObject;
+export const FURNITURE_TYPES = ['table', 'bed', 'counter', 'shelf', 'barrel', 'hearth', 'stall', 'well'] as const;
+export type FurnitureType = (typeof FURNITURE_TYPES)[number];
+
+/** Drawn furniture. Its squares are 'furniture' terrain (solid) or difficult floor (tables, beds). */
+export interface FurnitureObject extends BaseObject {
+  kind: 'furniture';
+  rect: Rect;
+  type: FurnitureType;
+}
+
+export type MapObject = RoomObject | CorridorObject | DoorObject | StairsObject | NoteObject | LootObject | FurnitureObject;
+
+/** How a map is drawn: rock-and-corridor dungeon, building interior, or outdoors. */
+export type MapStyle = 'dungeon' | 'interior' | 'outdoor';
 
 export interface GenerationRecord {
   seed: string;
@@ -130,6 +152,9 @@ export interface DungeonMap {
   objects: MapObject[];
   /** Present when the map came from the generator. */
   generation?: GenerationRecord;
+  style?: MapStyle;
+  /** Where the party starts, when there are no entrance stairs. */
+  spawn?: Point;
 }
 
 export const SIZES = ['tiny', 'small', 'medium', 'large', 'huge', 'gargantuan'] as const;

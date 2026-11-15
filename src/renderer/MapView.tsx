@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { DungeonMap, Point } from '../core/model/types';
-import { drawInkMap } from './ink';
-import { cacheCellSize, fitViewport, screenToCell, zoomAt, type Viewport } from './viewport';
+import { TILE, TileCache, tileCellSize } from './tileCache';
+import { fitViewport, screenToCell, zoomAt, type Viewport } from './viewport';
 
 export interface MapViewController {
   /** Ask for a redraw of the dynamic layer (tokens, previews, animation). */
@@ -24,10 +24,6 @@ interface Props {
   controllerRef?: React.RefObject<MapViewController | null>;
 }
 
-interface Cache {
-  canvas: HTMLCanvasElement;
-  cell: number;
-}
 
 const ZOOM_STEP = 1.25;
 const PAN_STEP = 80;
@@ -42,7 +38,10 @@ export function MapView({ map, showGrid, roomNumbers, onHoverCell, onCellClick, 
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const view = useRef<Viewport>({ zoom: 16, x: 0, y: 0 });
   const size = useRef({ w: 0, h: 0, dpr: 1 });
-  const cache = useRef<Cache | null>(null);
+  const tiles = useRef<TileCache | null>(null);
+  const drawSelf = useRef<() => void>(() => {});
+  /** Resolution tiles are built at; follows zoom after it settles. */
+  const tileCell = useRef(32);
   const hover = useRef<Point | null>(null);
   const frame = useRef(0);
   const rebuildTimer = useRef(0);
@@ -55,17 +54,6 @@ export function MapView({ map, showGrid, roomNumbers, onHoverCell, onCellClick, 
   });
   const [zoomPct, setZoomPct] = useState(100);
 
-  const rebuildCache = useCallback(() => {
-    const cell = cacheCellSize(view.current.zoom, size.current.dpr, map.width, map.height);
-    const canvas = cache.current?.canvas ?? document.createElement('canvas');
-    canvas.width = map.width * cell;
-    canvas.height = map.height * cell;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
-    drawInkMap(ctx, map, { cell, grid: showGrid, roomNumbers });
-    cache.current = { canvas, cell };
-  }, [map, showGrid, roomNumbers]);
-
   const draw = useCallback(() => {
     frame.current = 0;
     const canvas = canvasRef.current;
@@ -76,16 +64,44 @@ export function MapView({ map, showGrid, roomNumbers, onHoverCell, onCellClick, 
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.fillStyle = '#18171a';
     ctx.fillRect(0, 0, w, h);
-    if (!cache.current) rebuildCache();
-    if (cache.current) {
-      ctx.imageSmoothingEnabled = true;
-      ctx.imageSmoothingQuality = 'high';
-      ctx.save();
-      ctx.shadowColor = 'rgba(0,0,0,0.5)';
-      ctx.shadowBlur = 18;
-      ctx.drawImage(cache.current.canvas, v.x, v.y, map.width * v.zoom, map.height * v.zoom);
-      ctx.restore();
-    }
+    if (!tiles.current) tiles.current = new TileCache(map, { grid: showGrid, roomNumbers });
+    // Draw the visible tiles; build a few new ones per frame and fill gaps with
+    // any cached resolution so panning never shows holes for long.
+    const cell = tileCell.current;
+    const tx0 = Math.max(0, Math.floor(-v.x / v.zoom / TILE)),
+      ty0 = Math.max(0, Math.floor(-v.y / v.zoom / TILE));
+    const tx1 = Math.min(Math.ceil(map.width / TILE) - 1, Math.floor((w - v.x) / v.zoom / TILE)),
+      ty1 = Math.min(Math.ceil(map.height / TILE) - 1, Math.floor((h - v.y) / v.zoom / TILE));
+    let budget = 6;
+    let missing = false;
+    ctx.save();
+    ctx.shadowColor = 'rgba(0,0,0,0.5)';
+    ctx.shadowBlur = 18;
+    ctx.fillStyle = '#f2e8cf';
+    ctx.fillRect(v.x, v.y, map.width * v.zoom, map.height * v.zoom);
+    ctx.restore();
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
+    for (let ty = ty0; ty <= ty1; ty++)
+      for (let tx = tx0; tx <= tx1; tx++) {
+        let img = tiles.current.get(cell, tx, ty);
+        if (!img && budget > 0) {
+          img = tiles.current.build(cell, tx, ty);
+          budget--;
+        }
+        if (!img) {
+          img = tiles.current.fallback(cell, tx, ty);
+          missing = true;
+        }
+        if (!img) continue;
+        const sx = v.x + tx * TILE * v.zoom,
+          sy = v.y + ty * TILE * v.zoom;
+        const cw = Math.min(TILE, map.width - tx * TILE) * v.zoom,
+          ch = Math.min(TILE, map.height - ty * TILE) * v.zoom;
+        // Overdraw by a hair to hide seams between tiles.
+        ctx.drawImage(img, sx, sy, cw + 0.5, ch + 0.5);
+      }
+    if (missing) frame.current = requestAnimationFrame(() => drawSelf.current());
     overlayRef.current?.(ctx, v);
     const hc = hover.current;
     if (hc && hc.x >= 0 && hc.y >= 0 && hc.x < map.width && hc.y < map.height) {
@@ -95,7 +111,11 @@ export function MapView({ map, showGrid, roomNumbers, onHoverCell, onCellClick, 
       ctx.strokeRect(v.x + hc.x * v.zoom + 1, v.y + hc.y * v.zoom + 1, v.zoom - 2, v.zoom - 2);
       ctx.setLineDash([]);
     }
-  }, [map, rebuildCache]);
+  }, [map, showGrid, roomNumbers]);
+
+  useLayoutEffect(() => {
+    drawSelf.current = draw;
+  });
 
   const requestDraw = useCallback(() => {
     if (!frame.current) frame.current = requestAnimationFrame(draw);
@@ -105,17 +125,17 @@ export function MapView({ map, showGrid, roomNumbers, onHoverCell, onCellClick, 
     if (controllerRef) controllerRef.current = { requestDraw };
   }, [controllerRef, requestDraw]);
 
-  /** After a zoom, re-rasterize at the new resolution once the user pauses. */
+  /** After a zoom, switch tile resolution once the user pauses. */
   const scheduleSharpen = useCallback(() => {
     window.clearTimeout(rebuildTimer.current);
     rebuildTimer.current = window.setTimeout(() => {
-      const want = cacheCellSize(view.current.zoom, size.current.dpr, map.width, map.height);
-      if (cache.current?.cell !== want) {
-        rebuildCache();
+      const want = tileCellSize(view.current.zoom, size.current.dpr);
+      if (want !== tileCell.current) {
+        tileCell.current = want;
         requestDraw();
       }
     }, 150);
-  }, [map, rebuildCache, requestDraw]);
+  }, [requestDraw]);
 
   const setView = useCallback(
     (v: Viewport) => {
@@ -168,7 +188,7 @@ export function MapView({ map, showGrid, roomNumbers, onHoverCell, onCellClick, 
   // bitmap. Refit only for a different map, not for edits to the same one.
   const lastMapId = useRef<string | null>(null);
   useEffect(() => {
-    cache.current = null;
+    tiles.current = null;
     if (lastMapId.current !== map.id) {
       lastMapId.current = map.id;
       fit();

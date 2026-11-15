@@ -7,6 +7,7 @@
  * Everything this module decides is advisory: the DM can always override.
  */
 import { idx, inBounds } from '../model/grid';
+import { TERRAIN } from '../model/terrain';
 import type { DoorState, DungeonMap, GridPolicy, Size, Token } from '../model/types';
 
 export const RULESET_ID = 'dnd-2024/srd-5.2.1';
@@ -101,29 +102,18 @@ export function buildMoveGrid(map: DungeonMap, mover: Token, tokens: Token[], po
 
   for (let i = 0; i < n; i++) {
     const t = map.terrain[i];
-    if ((map.flags[i] & 1) !== 0) g.difficult[i] = 1;
-    switch (t) {
-      case 'void':
-      case 'wall':
-      case 'obstacle':
-        g.blocked[i] = 1;
-        g.solid[i] = 1;
-        break;
-      case 'door': {
-        // A door cell with no door object is treated as closed.
-        const state = doors.get(i) ?? 'closed';
-        if (state !== 'open') g.solid[i] = 1;
-        if (state === 'locked' || (state === 'closed' && policy.closedDoors === 'block')) g.blocked[i] = 1;
-        break;
-      }
-      case 'pit':
-      case 'hazard':
-        g.hazard[i] = 1;
-        break;
-      case 'floor':
-      case 'stairs':
-        break;
+    const info = TERRAIN[t];
+    if ((map.flags[i] & 1) !== 0 || info.difficult) g.difficult[i] = 1;
+    if (t === 'door') {
+      // A door cell with no door object is treated as closed.
+      const state = doors.get(i) ?? 'closed';
+      if (state !== 'open') g.solid[i] = 1;
+      if (state === 'locked' || (state === 'closed' && policy.closedDoors === 'block')) g.blocked[i] = 1;
+      continue;
     }
+    if (info.blocked) g.blocked[i] = 1;
+    if (info.solid) g.solid[i] = 1;
+    if (t === 'pit' || t === 'hazard') g.hazard[i] = 1;
   }
 
   for (const other of tokens) {

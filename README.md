@@ -44,6 +44,22 @@ A browser-based 2D dungeon authoring and encounter tool for D&D (2024 rules). Ge
 - **Item library** (editable, saved in the browser): gear, consumables, gems, art, magic items and quest items, each with a player-facing description and a DM-only note. "Can turn up in random loot" can be switched off (DM-placed only), and "Unique" items appear at most once per campaign.
 - **Loot generation:** each new dungeon gets a hoard in the lair and chests in some rooms. Creatures that carry loot get pocket loot. Amounts scale with party level (tiers 1–4) using this project's own tuning, and magic item rarity is capped by tier. Click a chest to see the contents and edit, add, give or reroll them. "Defeated: drop loot" leaves a creature's belongings where it fell. Items move between inventories.
 
+**Milestone 6 — map sizes (done).** Pick a size and type in the toolbar:
+
+| Size | Types | Grid |
+|---|---|---|
+| Small | Tavern / inn, Manor | 28×22, 38×30 |
+| Medium | Dungeon, Caves | 40×40 |
+| Large | Dungeon, Cave system | 80×80 |
+| Huge | Town, Forest | 120×120 |
+| Gargantuan | Walled city, Wilderness | 200×200 |
+
+- **Interiors:** the building is split recursively (BSP) into rooms with one door per split, plus a front door onto the street. Rooms get roles (common room, kitchen, guest rooms, study, library, chapel, storeroom with cellar stairs…) and matching furniture. Tables and beds are difficult terrain; counters, shelves, barrels and hearths block movement but not sight. Furniture is rolled back if it would block a doorway.
+- **Forests and wilderness:** noise-based woods and undergrowth, clearings (standing stones, campsites, ruins, ponds) linked by a trail from the map edge, and a stream. Wilderness adds a lake and a river with bridges.
+- **Towns and cities:** avenues and streets, blocks split into building lots with alleys, yards and gardens, and plazas (market stalls, wells). Cities add a wall with gates and a river with bridges.
+- New terrain: ground, road, tree (blocks movement and sight), brush and shallow water (difficult), deep water (blocks walking), furniture. All of it goes through one terrain table that the rules, fog, placement and validation share.
+- **Tiled renderer:** the map is drawn in 16×16-square tiles at the current zoom with per-square hashed randomness, so even 200×200 maps stay sharp and tiles line up seamlessly.
+
 Next: editor tools and undo (M2b), tokens/initiative/movement UI (M3), fog of war + player view window (M4), then the vertical-slice playtest (M5).
 
 ## Scripts
