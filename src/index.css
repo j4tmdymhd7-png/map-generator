@@ -45,6 +45,7 @@ body,
   align-items: center;
 }
 input,
+select,
 button {
   font: inherit;
   padding: 0.35rem 0.6rem;

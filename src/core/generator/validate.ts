@@ -1,4 +1,4 @@
-import { idx, inBounds, ORTHOGONAL, rectsOverlap, terrainAt } from '../model/grid';
+import { idx, inBounds, ORTHOGONAL, rectCenter, rectsOverlap, terrainAt } from '../model/grid';
 import type { DungeonMap, RoomObject } from '../model/types';
 
 export interface ValidationIssue {
@@ -33,7 +33,8 @@ export function validateDungeon(map: DungeonMap): ValidationIssue[] {
 
   if (rooms.length > 1) {
     const seen = new Uint8Array(map.width * map.height);
-    const start = rooms[0].rect;
+    // Room centers are always open floor (generator guarantees it; shaped rooms may not fill their corners).
+    const start = rectCenter(rooms[0].rect);
     const queue: number[] = [idx(map, start.x, start.y)];
     seen[queue[0]] = 1;
     while (queue.length) {
@@ -51,7 +52,7 @@ export function validateDungeon(map: DungeonMap): ValidationIssue[] {
       }
     }
     for (const r of rooms.slice(1))
-      if (!seen[idx(map, r.rect.x, r.rect.y)])
+      if (!seen[idx(map, rectCenter(r.rect).x, rectCenter(r.rect).y)])
         issues.push({ severity: 'error', message: `${r.label ?? r.id} can't be reached from ${rooms[0].label ?? rooms[0].id}.` });
   }
   return issues;

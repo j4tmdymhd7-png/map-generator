@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { SCHEMA_VERSION, SIZES, TERRAINS, type Campaign } from './types';
+import { ROOM_SHAPES, SCHEMA_VERSION, SIZES, TERRAINS, type Campaign } from './types';
 
 const point = z.object({ x: z.number().int(), y: z.number().int() });
 const rect = z.object({
@@ -12,7 +12,7 @@ const visibility = z.enum(['public', 'dm']);
 const base = { id: z.string().min(1), visibility, label: z.string().optional() };
 
 const mapObject = z.discriminatedUnion('kind', [
-  z.object({ ...base, kind: z.literal('room'), rect }),
+  z.object({ ...base, kind: z.literal('room'), rect, shape: z.enum(ROOM_SHAPES).optional() }),
   z.object({ ...base, kind: z.literal('corridor'), cells: z.array(point) }),
   z.object({ ...base, kind: z.literal('door'), at: point, state: z.enum(['open', 'closed', 'locked']) }),
   z.object({

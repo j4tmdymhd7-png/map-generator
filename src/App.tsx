@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react';
-import { generateDungeon } from './core/generator/generate';
+import { generateDungeon, type Theme } from './core/generator/generate';
 import type { Point } from './core/model/types';
 import { randomSeed } from './core/rng';
 import { MapView } from './renderer/MapView';
@@ -10,10 +10,11 @@ const BUILD_DATE = __BUILD_DATE__;
 
 export default function App() {
   const [seed, setSeed] = useState('goblin-warren');
+  const [theme, setTheme] = useState<Theme>('dungeon');
   const [showGrid, setShowGrid] = useState(true);
   const [roomNumbers, setRoomNumbers] = useState(true);
   const [hover, setHover] = useState<Point | null>(null);
-  const result = useMemo(() => generateDungeon(seed), [seed]);
+  const result = useMemo(() => generateDungeon(seed, { theme }), [seed, theme]);
 
   const rooms = result.map.objects.filter((o) => o.kind === 'room').length;
   const doors = result.map.objects.filter((o) => o.kind === 'door').length;
@@ -32,6 +33,13 @@ export default function App() {
         <button type="button" onClick={() => setSeed(randomSeed())}>
           New random seed
         </button>
+        <label>
+          Theme{' '}
+          <select value={theme} onChange={(e) => setTheme(e.target.value as Theme)}>
+            <option value="dungeon">Dungeon</option>
+            <option value="cave">Caves</option>
+          </select>
+        </label>
         <label className="check">
           <input type="checkbox" checked={showGrid} onChange={(e) => setShowGrid(e.target.checked)} /> Grid
         </label>

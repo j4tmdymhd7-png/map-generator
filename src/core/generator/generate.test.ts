@@ -4,6 +4,10 @@ import { parseCampaign } from '../model/schema';
 import { SCHEMA_VERSION, type Campaign, type RoomObject } from '../model/types';
 import { generateDungeon, GENERATOR_VERSION } from './generate';
 import { validateDungeon } from './validate';
+import { rectCenter } from '../model/grid';
+import { buildMoveGrid } from '../rules/dnd2024';
+import { computeReach, costTo } from '../rules/pathfinding';
+import { token } from '../rules/test-helpers';
 
 const seeds = Array.from({ length: 200 }, (_, i) => `seed-${i}`);
 
@@ -67,6 +71,60 @@ describe('dungeon generator', () => {
         if (!inside) map.terrain[yy * map.width + xx] = 'wall';
       }
     expect(validateDungeon(map).some((i) => i.message.includes("can't be reached"))).toBe(true);
+  });
+});
+
+describe('generator v2 variety', () => {
+  for (const theme of ['dungeon', 'cave'] as const) {
+    it(`a Medium creature can walk from the entrance to every room (${theme})`, () => {
+      for (const s of seeds.slice(0, 80)) {
+        const { map, issues } = generateDungeon(s, { theme });
+        expect(issues.filter((i) => i.severity === 'error'), `${theme} ${s}`).toEqual([]);
+        const rooms = map.objects.filter((o): o is RoomObject => o.kind === 'room');
+        const start = rectCenter(rooms[0].rect);
+        const mover = token({ mapId: map.id, position: start });
+        const grid = buildMoveGrid(map, mover, [mover], { diagonal: 'uniform', closedDoors: 'passable' });
+        const reach = computeReach(grid, start, 1);
+        for (const r of rooms) expect(costTo(reach, rectCenter(r.rect)), `${theme} ${s} ${r.label}`).toBeLessThan(Infinity);
+      }
+    });
+  }
+
+  it('produces a mix of room shapes and furnishings', () => {
+    const shapes = new Set<string>();
+    let pillars = 0,
+      pits = 0,
+      rubble = 0;
+    for (const s of seeds.slice(0, 40)) {
+      const { map } = generateDungeon(s);
+      for (const o of map.objects) if (o.kind === 'room') shapes.add(o.shape ?? 'rect');
+      map.terrain.forEach((t, i) => {
+        if (t === 'obstacle') pillars++;
+        if (t === 'pit') pits++;
+        if (map.flags[i] & 1) rubble++;
+      });
+    }
+    expect([...shapes].sort()).toEqual(['cave', 'cross', 'rect', 'round']);
+    expect(pillars).toBeGreaterThan(0);
+    expect(pits).toBeGreaterThan(0);
+    expect(rubble).toBeGreaterThan(0);
+  });
+
+  it('caves have no doors and use cavern shapes', () => {
+    const { map } = generateDungeon('wyrm-hollow', { theme: 'cave' });
+    expect(map.objects.some((o) => o.kind === 'door')).toBe(false);
+    expect(map.objects.filter((o) => o.kind === 'room').every((o) => o.kind === 'room' && (o.shape === 'cave' || o.shape === 'round'))).toBe(true);
+  });
+
+  it('never puts a pillar or pit on a room center', () => {
+    for (const s of seeds.slice(0, 60)) {
+      const { map } = generateDungeon(s);
+      for (const o of map.objects) {
+        if (o.kind !== 'room') continue;
+        const c = rectCenter(o.rect);
+        expect(['floor', 'stairs']).toContain(terrainAt(map, c.x, c.y));
+      }
+    }
   });
 });
 
