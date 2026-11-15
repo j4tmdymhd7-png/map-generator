@@ -1,9 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { rollEncounter } from './core/encounter/random';
+import { rollLoot, stockDungeon, tierForLevel } from './core/loot/generate';
+import { LootPanel } from './encounter/LootPanel';
+import { LibraryDialog } from './library/LibraryDialog';
+import { useLibrary } from './library/useLibrary';
 import { wanderAll } from './core/encounter/wander';
 import { generateDungeon, type Theme } from './core/generator/generate';
 import { idx } from './core/model/grid';
-import type { DoorState, DungeonMap, GridPolicy, Point, Token } from './core/model/types';
+import type { DoorState, DungeonMap, GridPolicy, ItemStack, LootObject, Point, Token } from './core/model/types';
 import { footprintSquares } from './core/rules/dnd2024';
 import { createRng, randomSeed } from './core/rng';
 import { computeVisible, FOG_EXPLORED, FOG_HIDDEN, FOG_VISIBLE, updateFog } from './core/visibility/fog';
@@ -65,13 +69,29 @@ export default function App() {
   const [autoDoors, setAutoDoors] = useState(true);
   const [encounterChance, setEncounterChance] = useState(0);
   const [wandering, setWandering] = useState(true);
+  const [partyLevel, setPartyLevel] = useState(3);
+  const [libraryOpen, setLibraryOpen] = useState(false);
+  const [lootId, setLootId] = useState<string | null>(null);
+  const lib = useLibrary();
+  const tier = tierForLevel(partyLevel);
 
-  // The generated map, plus live edits (door states) layered on top.
+  // The generated map plus live edits (doors, loot) layered on top. Each new
+  // map is stocked with loot from the item library.
   const generated = useMemo(() => generateDungeon(seed, { theme }), [seed, theme]);
-  const [mapState, setMapState] = useState({ source: generated, map: generated.map });
-  if (mapState.source !== generated) setMapState({ source: generated, map: generated.map });
+  const stock = (m: DungeonMap, rngSeed: string, used: Set<string>): DungeonMap => ({
+    ...m,
+    objects: [...m.objects.filter((o) => o.kind !== 'loot'), ...stockDungeon(m, createRng(rngSeed), lib.items, partyLevel, used)],
+  });
+  const [mapState, setMapState] = useState(() => ({ source: generated, map: stock(generated.map, `${seed}:loot`, lib.usedUniques) }));
+  if (mapState.source !== generated) setMapState({ source: generated, map: stock(generated.map, `${seed}:loot`, lib.usedUniques) });
   const map = mapState.source === generated ? mapState.map : generated.map;
   const setDoor = (p: Point, state: DoorState) => setMapState((ms) => ({ ...ms, map: withDoorState(ms.map, p, state) }));
+  const editMap = (fn: (m: DungeonMap) => DungeonMap) => setMapState((ms) => ({ ...ms, map: fn(ms.map) }));
+  const lootObjects = map.objects.filter((o): o is LootObject => o.kind === 'loot');
+  const lootAt = (p: Point) => lootObjects.find((l) => l.at.x === p.x && l.at.y === p.y) ?? null;
+  const setLootItems = (id: string, items: ItemStack[]) =>
+    editMap((m) => ({ ...m, objects: m.objects.map((o) => (o.kind === 'loot' && o.id === id ? { ...o, items } : o)) }));
+  const pocketLoot = () => rollLoot(createRng(randomSeed()), tier, 'pocket', lib.items, lib.usedUniques);
 
   const policy: GridPolicy = useMemo(() => ({ diagonal: 'uniform', closedDoors: autoDoors ? 'passable' : 'block' }), [autoDoors]);
   const controller = useRef<MapViewController | null>(null);
@@ -84,6 +104,10 @@ export default function App() {
     policy,
     onStep: (t, sq) => {
       setStepPos({ id: t.id, pos: sq });
+      if (t.side === 'party') {
+        const found = map.objects.find((o) => o.kind === 'loot' && o.items.length > 0 && Math.abs(o.at.x - sq.x) <= 1 && Math.abs(o.at.y - sq.y) <= 1);
+        if (found && found.kind === 'loot') setMessage({ text: `${t.label} found ${found.container === 'chest' ? 'a chest' : 'some loot'}. Click it to see what's inside.` });
+      }
       if (!autoDoors) return;
       for (const c of footprint(t, sq)) {
         const d = doorAt(map, c);
@@ -91,7 +115,53 @@ export default function App() {
       }
     },
     onMoveEnd: () => setStepPos(null),
+    creatures: lib.creatures,
+    pocketLoot,
   });
+
+  // ---- Loot -----------------------------------------------------------------
+  const party = enc.tokens.filter((t) => t.side === 'party');
+  /** Add a stack to a token's pack, merging with an identical library item. */
+  const addToInventory = (to: Token, stack: ItemStack) => {
+    const inv = to.inventory ?? [];
+    const same = stack.defId ? inv.find((s) => s.defId === stack.defId && s.name === stack.name) : inv.find((s) => s.category === 'coins' && s.name === stack.name);
+    enc.updateToken(to.id, { inventory: same ? inv.map((s) => (s === same ? { ...s, qty: s.qty + stack.qty } : s)) : [...inv, stack] });
+    if (stack.defId && lib.items.find((d) => d.id === stack.defId)?.unique) lib.markUsed([stack.defId]);
+  };
+  const giveFromLoot = (loot: LootObject, stack: ItemStack, to: Token) => {
+    setLootItems(loot.id, loot.items.filter((s) => s.id !== stack.id));
+    addToInventory(to, stack);
+    setMessage({ text: `${to.label} takes ${stack.qty > 1 ? `${stack.qty} × ` : ''}${stack.name}.` });
+  };
+  const giveFromToken = (from: Token, stack: ItemStack, to: Token) => {
+    enc.updateToken(from.id, { inventory: (from.inventory ?? []).filter((s) => s.id !== stack.id) });
+    addToInventory(to, stack);
+    setMessage({ text: `${from.label} gives ${stack.name} to ${to.label}.` });
+  };
+  const defeat = (t: Token) => {
+    const inv = t.inventory ?? [];
+    if (inv.length) {
+      const pile: LootObject = {
+        id: `loot-drop-${t.id}`,
+        kind: 'loot',
+        container: 'pile',
+        at: t.position,
+        items: inv,
+        label: `${t.label}'s belongings`,
+        visibility: 'public',
+      };
+      editMap((m) => ({ ...m, objects: [...m.objects, pile] }));
+    }
+    enc.removeToken(t.id);
+    setMessage({ text: inv.length ? `${t.label} is defeated and drops ${inv.length} item${inv.length > 1 ? 's' : ''}.` : `${t.label} is defeated.` });
+  };
+  const restock = () => {
+    const used = new Set([...lib.usedUniques, ...party.flatMap((t) => (t.inventory ?? []).map((s) => s.defId ?? ''))]);
+    setMapState((ms) => ({ ...ms, map: stock(ms.map, randomSeed(), used) }));
+    setLootId(null);
+    setMessage({ text: 'Loot rerolled for the whole dungeon.', dmOnly: true });
+  };
+  const selectedLoot = lootId ? lootObjects.find((l) => l.id === lootId) ?? null : null;
 
   // ---- Fog of war -------------------------------------------------------
   const viewers = useMemo(
@@ -117,7 +187,7 @@ export default function App() {
 
   // ---- Random encounters --------------------------------------------------
   const rollNow = (prefix = '') => {
-    const res = rollEncounter(map, enc.tokens, fog, createRng(randomSeed()), newTokenId);
+    const res = rollEncounter(map, enc.tokens, fog, createRng(randomSeed()), newTokenId, lib.creatures, { items: lib.items, tier, used: lib.usedUniques });
     if (!res) {
       setMessage({ text: `${prefix}No unseen room far enough from the party for an encounter.`, dmOnly: true });
       return;
@@ -181,7 +251,13 @@ export default function App() {
       drawMovePreview(ctx, v, { mover: enc.selected, reachable, path: hoverPath, target: hover });
     }
     const shown = playerView ? enc.tokens.filter(playersSee) : enc.tokens;
-    drawTokens(ctx, v, shown, { selectedId: enc.selected?.id ?? null, animating: enc.animating.current, onImageLoad: requestDraw });
+    drawTokens(ctx, v, shown, {
+      selectedId: enc.selected?.id ?? null,
+      animating: enc.animating.current,
+      onImageLoad: requestDraw,
+      showHp: !playerView,
+      activeId: enc.activeId,
+    });
   };
 
   // ---- Input ----------------------------------------------------------------
@@ -215,6 +291,11 @@ export default function App() {
       return;
     }
     if (!enc.selected) {
+      const loot = lootAt(cell);
+      if (loot && (!playerView || fogAt(cell) !== FOG_HIDDEN)) {
+        setLootId(loot.id === lootId ? null : loot.id);
+        return;
+      }
       toggleDoor(cell, mods.shift);
       return;
     }
@@ -267,7 +348,7 @@ export default function App() {
   const turnPrefix = activeToken ? `${activeToken.label}'s turn · ` : '';
   const hint = enc.selected
     ? `${turnPrefix}${enc.selected.label} selected · ${enc.remaining(enc.selected)} ft left · click a square to move, O to open/close an adjacent door, Esc to deselect`
-    : `${turnPrefix}${rooms} rooms · N for ${enc.combat ? 'next turn' : 'next round'} · click a token to select it · click a door to open or close it (Shift-click to lock)`;
+    : `${turnPrefix}${rooms} rooms · ${lootObjects.length} chests · N for ${enc.combat ? 'next turn' : 'next round'} · click a token to select it · click a door to open or close it (Shift-click to lock)`;
 
   return (
     <div className="app">
@@ -297,6 +378,10 @@ export default function App() {
           <input type="checkbox" checked={roomNumbers} onChange={(e) => setRoomNumbers(e.target.checked)} /> Room numbers
         </label>
         <span className="toolbar-sep" aria-hidden />
+        <button type="button" onClick={() => setLibraryOpen(true)}>
+          Library
+        </button>
+        <span className="toolbar-sep" aria-hidden />
         <label className="check">
           <input type="checkbox" checked={fogOn} onChange={(e) => setFogOn(e.target.checked)} /> Fog of war
         </label>
@@ -319,7 +404,43 @@ export default function App() {
           onKey={onKey}
           controllerRef={controller}
         />
-        <TokenPanel enc={enc} hideFromPlayers={playerView ? (t) => !playersSee(t) : undefined}>
+        <TokenPanel
+          enc={enc}
+          hideFromPlayers={playerView ? (t) => !playersSee(t) : undefined}
+          playerView={playerView}
+          creatures={lib.creatures}
+          items={lib.items}
+          onGive={giveFromToken}
+          onDefeat={defeat}
+        >
+          {selectedLoot &&
+            (playerView ? (
+              <p className="fine">Loot details are hidden in Player view.</p>
+            ) : (
+              <LootPanel
+                loot={selectedLoot}
+                items={lib.items}
+                party={party}
+                onChange={(items) => setLootItems(selectedLoot.id, items)}
+                onGive={(stack, to) => giveFromLoot(selectedLoot, stack, to)}
+                onGiveAll={(to) => {
+                  for (const s of selectedLoot.items) addToInventory(to, s);
+                  setLootItems(selectedLoot.id, []);
+                  setMessage({ text: `${to.label} takes everything from ${selectedLoot.label ?? 'the chest'}.` });
+                }}
+                onReroll={() =>
+                  setLootItems(
+                    selectedLoot.id,
+                    rollLoot(createRng(randomSeed()), tier, selectedLoot.label?.startsWith('Hoard') ? 'hoard' : selectedLoot.container === 'pile' ? 'pocket' : 'cache', lib.items, lib.usedUniques),
+                  )
+                }
+                onRemove={() => {
+                  editMap((m) => ({ ...m, objects: m.objects.filter((o) => o.id !== selectedLoot.id) }));
+                  setLootId(null);
+                }}
+                onClose={() => setLootId(null)}
+              />
+            ))}
           <TurnPanel
             enc={enc}
             onNextRound={nextRound}
@@ -353,6 +474,21 @@ export default function App() {
             <label className="check">
               <input type="checkbox" checked={wandering} onChange={(e) => setWandering(e.target.checked)} /> Unseen monsters wander between rounds
             </label>
+            <h3>Loot</h3>
+            <label>
+              Party level
+              <select value={partyLevel} onChange={(e) => setPartyLevel(Number(e.target.value))}>
+                {Array.from({ length: 20 }, (_, i) => i + 1).map((l) => (
+                  <option key={l} value={l}>
+                    Level {l} (tier {tierForLevel(l)})
+                  </option>
+                ))}
+              </select>
+            </label>
+            <button type="button" onClick={restock}>
+              Reroll dungeon loot ({lootObjects.length} chests)
+            </button>
+            <p className="fine">Click a chest (with no token selected) to see and hand out what's inside. Add quest and lore items in the Library.</p>
             <h3>Random encounters</h3>
             <label>
               Check each new round
@@ -370,6 +506,7 @@ export default function App() {
           </section>
         </TokenPanel>
       </div>
+      {libraryOpen && <LibraryDialog lib={lib} onClose={() => setLibraryOpen(false)} />}
       <footer className="statusbar" aria-live="polite">
         <span>{shownMessage ?? pathText ?? hint}</span>
         <span>{hover ? (hoverHidden ? `Square ${hover.x}, ${hover.y} · unexplored` : `Square ${hover.x}, ${hover.y} · ${terrain}`) : ''}</span>

@@ -78,7 +78,38 @@ export interface NoteObject extends BaseObject {
   text: string;
 }
 
-export type MapObject = RoomObject | CorridorObject | DoorObject | StairsObject | NoteObject;
+export const ITEM_CATEGORIES = ['coins', 'gear', 'consumable', 'gem', 'art', 'magic', 'quest'] as const;
+export type ItemCategory = (typeof ITEM_CATEGORIES)[number];
+export const RARITIES = ['common', 'uncommon', 'rare', 'very rare', 'legendary', 'artifact'] as const;
+export type Rarity = (typeof RARITIES)[number];
+
+/**
+ * A quantity of an item somewhere (a chest, a pile, a creature's pack). It is
+ * a snapshot: editing the item library later doesn't rewrite loot already placed.
+ */
+export interface ItemStack {
+  id: string;
+  name: string;
+  category: ItemCategory;
+  qty: number;
+  /** Value of one, in gold pieces. */
+  valueGp?: number;
+  rarity?: Rarity;
+  description?: string;
+  /** DM-only note (quest hooks, lore, who it belonged to). */
+  dmNote?: string;
+  /** Library item this came from, if any. */
+  defId?: string;
+}
+
+export interface LootObject extends BaseObject {
+  kind: 'loot';
+  at: Point;
+  container: 'chest' | 'pile';
+  items: ItemStack[];
+}
+
+export type MapObject = RoomObject | CorridorObject | DoorObject | StairsObject | NoteObject | LootObject;
 
 export interface GenerationRecord {
   seed: string;
@@ -112,6 +143,23 @@ export interface Speeds {
   swim?: number;
   fly?: number;
   burrow?: number;
+}
+
+export const ABILITIES = ['str', 'dex', 'con', 'int', 'wis', 'cha'] as const;
+export type Ability = (typeof ABILITIES)[number];
+
+/** A DM-editable stat block. Kept deliberately small; free text covers the rest. */
+export interface StatBlock {
+  ac: number;
+  hp: number;
+  maxHp: number;
+  tempHp?: number;
+  abilities: Record<Ability, number>;
+  /** Challenge rating as written ("1/4", "5"). */
+  cr?: string;
+  /** Actions, traits, spells: free text. */
+  actions?: string;
+  notes?: string;
 }
 
 export interface Senses {
@@ -150,6 +198,10 @@ export interface Token {
   home?: Point;
   /** Max squares a guard roams from home. */
   leash?: number;
+  stats?: StatBlock;
+  inventory?: ItemStack[];
+  /** Creature library template this was made from. */
+  templateId?: string;
 }
 
 export type DiagonalPolicy =

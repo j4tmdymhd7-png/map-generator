@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { BEHAVIORS, ROOM_SHAPES, SCHEMA_VERSION, SIZES, TERRAINS, type Campaign } from './types';
+import { ABILITIES, BEHAVIORS, ITEM_CATEGORIES, RARITIES, ROOM_SHAPES, SCHEMA_VERSION, SIZES, TERRAINS, type Campaign } from './types';
 
 const point = z.object({ x: z.number().int(), y: z.number().int() });
 const rect = z.object({
@@ -10,6 +10,18 @@ const rect = z.object({
 });
 const visibility = z.enum(['public', 'dm']);
 const base = { id: z.string().min(1), visibility, label: z.string().optional() };
+
+export const itemStackSchema = z.object({
+  id: z.string().min(1),
+  name: z.string(),
+  category: z.enum(ITEM_CATEGORIES),
+  qty: z.number().int().nonnegative(),
+  valueGp: z.number().nonnegative().optional(),
+  rarity: z.enum(RARITIES).optional(),
+  description: z.string().optional(),
+  dmNote: z.string().optional(),
+  defId: z.string().optional(),
+});
 
 const mapObject = z.discriminatedUnion('kind', [
   z.object({ ...base, kind: z.literal('room'), rect, shape: z.enum(ROOM_SHAPES).optional() }),
@@ -23,6 +35,7 @@ const mapObject = z.discriminatedUnion('kind', [
     linkTo: z.object({ mapId: z.string(), objectId: z.string() }).optional(),
   }),
   z.object({ ...base, kind: z.literal('note'), at: point, text: z.string() }),
+  z.object({ ...base, kind: z.literal('loot'), at: point, container: z.enum(['chest', 'pile']), items: z.array(itemStackSchema) }),
 ]);
 
 const dungeonMap = z
@@ -78,6 +91,20 @@ const token = z.object({
   behavior: z.enum(BEHAVIORS).optional(),
   home: point.optional(),
   leash: z.number().int().nonnegative().optional(),
+  stats: z
+    .object({
+      ac: z.number().int(),
+      hp: z.number().int(),
+      maxHp: z.number().int().nonnegative(),
+      tempHp: z.number().int().nonnegative().optional(),
+      abilities: z.object(Object.fromEntries(ABILITIES.map((a) => [a, z.number().int().min(1).max(30)])) as Record<(typeof ABILITIES)[number], z.ZodNumber>),
+      cr: z.string().optional(),
+      actions: z.string().optional(),
+      notes: z.string().optional(),
+    })
+    .optional(),
+  inventory: z.array(itemStackSchema).optional(),
+  templateId: z.string().optional(),
 });
 
 export const campaignSchema = z.object({

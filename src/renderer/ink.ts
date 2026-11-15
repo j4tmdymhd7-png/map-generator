@@ -9,7 +9,7 @@
  * symbol, never by hue.
  */
 import { idx, isDifficult, terrainAt } from '../core/model/grid';
-import type { DoorState, DungeonMap, RoomObject } from '../core/model/types';
+import type { DoorState, DungeonMap, LootObject, RoomObject } from '../core/model/types';
 import { createRng, type Rng } from '../core/rng';
 import { doorOrientation, isOpenAt, rockDistance, wallSegments, type Segment } from './geometry';
 
@@ -336,6 +336,58 @@ function drawRubble(ctx: Ctx, x: number, y: number, c: number, rng: Rng) {
   }
 }
 
+/** A small inked chest; drawn with the lid thrown back once it's been emptied. */
+function drawLoot(ctx: Ctx, loot: LootObject, c: number) {
+  const cx = (loot.at.x + 0.5) * c,
+    cy = (loot.at.y + 0.5) * c;
+  const empty = loot.items.length === 0;
+  ctx.save();
+  ctx.translate(cx, cy);
+  ctx.strokeStyle = INK.ink;
+  ctx.fillStyle = INK.floor;
+  ctx.lineWidth = Math.max(1, c * 0.055);
+  ctx.lineJoin = 'round';
+  if (loot.container === 'pile') {
+    // A heap of coins and odds and ends
+    for (const [dx, dy, r] of [
+      [-0.14, 0.08, 0.13],
+      [0.12, 0.1, 0.12],
+      [0, -0.08, 0.14],
+    ] as const) {
+      ctx.beginPath();
+      ctx.arc(dx * c, dy * c, r * c, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+    }
+    ctx.restore();
+    return;
+  }
+  const w = c * 0.62,
+    h = c * 0.4;
+  // Body
+  ctx.beginPath();
+  ctx.rect(-w / 2, -h / 2 + c * 0.06, w, h);
+  ctx.fill();
+  ctx.stroke();
+  if (empty) {
+    // Lid thrown back
+    ctx.beginPath();
+    ctx.rect(-w / 2, -h / 2 - c * 0.14, w, c * 0.18);
+    ctx.setLineDash([c * 0.06, c * 0.05]);
+    ctx.stroke();
+    ctx.setLineDash([]);
+  } else {
+    // Lid band and clasp
+    ctx.beginPath();
+    ctx.moveTo(-w / 2, -h / 2 + c * 0.2);
+    ctx.lineTo(w / 2, -h / 2 + c * 0.2);
+    ctx.stroke();
+    ctx.fillStyle = INK.ink;
+    ctx.fillRect(-c * 0.05, -h / 2 + c * 0.15, c * 0.1, c * 0.12);
+  }
+  ctx.restore();
+}
+
 function drawFeatures(ctx: Ctx, map: DungeonMap, c: number, rng: Rng) {
   const doors = new Map<number, DoorState>();
   for (const o of map.objects) if (o.kind === 'door') doors.set(idx(map, o.at.x, o.at.y), o.state);
@@ -365,6 +417,7 @@ function drawFeatures(ctx: Ctx, map: DungeonMap, c: number, rng: Rng) {
       }
     }
   }
+  for (const o of map.objects) if (o.kind === 'loot') drawLoot(ctx, o, c);
 }
 
 function drawRoomNumbers(ctx: Ctx, map: DungeonMap, c: number) {

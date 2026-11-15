@@ -8,6 +8,7 @@
 import type { Point, Token } from '../core/model/types';
 import { footprintSquares } from '../core/rules/dnd2024';
 import type { PathResult } from '../core/rules/pathfinding';
+import { CONDITIONS } from '../core/stats';
 import { getPortrait, initials } from './avatars';
 import { INK } from './ink';
 import type { Viewport } from './viewport';
@@ -17,6 +18,9 @@ export interface TokenDrawState {
   /** Fractional grid position override for a token mid-animation. */
   animating?: { id: string; pos: Point } | null;
   onImageLoad: () => void;
+  /** Show HP bars (DM view only). */
+  showHp?: boolean;
+  activeId?: string | null;
 }
 
 function ring(ctx: CanvasRenderingContext2D, t: Token, cx: number, cy: number, r: number) {
@@ -51,7 +55,8 @@ function ring(ctx: CanvasRenderingContext2D, t: Token, cx: number, cy: number, r
   ctx.stroke();
 }
 
-function drawOne(ctx: CanvasRenderingContext2D, v: Viewport, t: Token, pos: Point, selected: boolean, onImageLoad: () => void) {
+function drawOne(ctx: CanvasRenderingContext2D, v: Viewport, t: Token, pos: Point, selected: boolean, st: TokenDrawState) {
+  const onImageLoad = st.onImageLoad;
   const s = footprintSquares(t.size);
   const sizePx = s * v.zoom * (t.size === 'tiny' ? 0.5 : 1);
   const cx = v.x + (pos.x + s / 2) * v.zoom,
@@ -92,6 +97,76 @@ function drawOne(ctx: CanvasRenderingContext2D, v: Viewport, t: Token, pos: Poin
 
   ring(ctx, t, cx, cy, r);
 
+  // Down at 0 HP: wash out the portrait and cross it through.
+  const down = !!t.stats && t.stats.hp <= 0;
+  if (down) {
+    ctx.save();
+    ctx.fillStyle = 'rgba(251, 246, 232, 0.6)';
+    ctx.beginPath();
+    ctx.arc(cx, cy, r, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = INK.ink;
+    ctx.lineWidth = Math.max(2, r * 0.14);
+    ctx.lineCap = 'round';
+    const k = r * 0.6;
+    ctx.beginPath();
+    ctx.moveTo(cx - k, cy - k);
+    ctx.lineTo(cx + k, cy + k);
+    ctx.moveTo(cx + k, cy - k);
+    ctx.lineTo(cx - k, cy + k);
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  // Whose turn it is: a small ink pennant above the token.
+  if (st.activeId === t.id) {
+    ctx.fillStyle = INK.ink;
+    ctx.beginPath();
+    const ty = cy - r * (t.side === 'enemy' ? 1.3 : 1.15);
+    ctx.moveTo(cx - r * 0.28, ty - r * 0.42);
+    ctx.lineTo(cx + r * 0.28, ty - r * 0.42);
+    ctx.lineTo(cx, ty);
+    ctx.closePath();
+    ctx.fill();
+  }
+
+  // HP bar (DM only): remaining health as solid ink on paper.
+  if (st.showHp && t.stats && t.stats.maxHp > 0 && v.zoom >= 14) {
+    const frac = Math.max(0, Math.min(1, t.stats.hp / t.stats.maxHp));
+    const bw = r * 1.6,
+      bh = Math.max(3, r * 0.16);
+    const bx = cx - bw / 2,
+      by = cy - r - bh - Math.max(2, r * 0.1) - (t.side === 'enemy' ? r * 0.22 : 0);
+    ctx.fillStyle = INK.floor;
+    ctx.fillRect(bx, by, bw, bh);
+    ctx.fillStyle = INK.ink;
+    ctx.fillRect(bx, by, bw * frac, bh);
+    ctx.strokeStyle = INK.ink;
+    ctx.lineWidth = 1;
+    ctx.strokeRect(bx, by, bw, bh);
+  }
+
+  // Condition badges along the right side (visible to everyone).
+  const conds = t.conditions.map((cnd) => CONDITIONS.find((x) => x.name === cnd)?.badge ?? cnd.slice(0, 3).toUpperCase());
+  if (conds.length && v.zoom >= 18) {
+    const fs = Math.max(8, Math.min(12, r * 0.42));
+    ctx.font = `bold ${fs}px system-ui, sans-serif`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    conds.slice(0, 4).forEach((b, i) => {
+      const label = i === 3 && conds.length > 4 ? `+${conds.length - 3}` : b;
+      const tw = ctx.measureText(label).width + 6;
+      const bx = cx + r * 0.7,
+        by = cy - r * 0.75 + i * (fs + 4);
+      ctx.fillStyle = INK.ink;
+      ctx.beginPath();
+      ctx.roundRect(bx, by, tw, fs + 3, 3);
+      ctx.fill();
+      ctx.fillStyle = INK.floor;
+      ctx.fillText(label, bx + tw / 2, by + (fs + 3) / 2 + 0.5);
+    });
+  }
+
   if (selected) {
     ctx.strokeStyle = INK.ink;
     ctx.lineWidth = Math.max(1.5, r * 0.07);
@@ -131,7 +206,7 @@ export function drawTokens(ctx: CanvasRenderingContext2D, v: Viewport, tokens: T
   const ordered = [...tokens].sort((a, b) => Number(a.id === st.selectedId) - Number(b.id === st.selectedId));
   for (const t of ordered) {
     const pos = st.animating?.id === t.id ? st.animating.pos : t.position;
-    drawOne(ctx, v, t, pos, t.id === st.selectedId, st.onImageLoad);
+    drawOne(ctx, v, t, pos, t.id === st.selectedId, st);
   }
 }
 

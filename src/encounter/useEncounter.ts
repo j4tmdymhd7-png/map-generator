@@ -2,7 +2,8 @@ import { useCallback, useMemo, useRef, useState } from 'react';
 import { placeGroup, startPoint } from '../core/encounter/placement';
 import { rollInitiative, sortInitiative, type InitiativeEntry } from '../core/encounter/initiative';
 import { createRng, randomSeed } from '../core/rng';
-import type { DungeonMap, GridPolicy, Point, RoomObject, Token } from '../core/model/types';
+import type { DungeonMap, GridPolicy, ItemStack, Point, RoomObject, StatBlock, Token } from '../core/model/types';
+import { STARTER_CREATURES, tokenFromTemplate, type CreatureTemplate } from '../core/library/creatures';
 import { rectCenter } from '../core/model/grid';
 import { buildMoveGrid, describeAssumptions, footprintSquares } from '../core/rules/dnd2024';
 import { computeReach, pathTo, reachableDestinations, type PathResult } from '../core/rules/pathfinding';
@@ -20,18 +21,27 @@ export function newTokenId(): string {
   return `tok-${Date.now().toString(36)}-${nextTokenNumber++}`;
 }
 
-function demoTokens(map: DungeonMap): Token[] {
+const ab = (str: number, dex: number, con: number, int: number, wis: number, cha: number) => ({ str, dex, con, int, wis, cha });
+const pc = (ac: number, hp: number, abilities: StatBlock['abilities']): StatBlock => ({ ac, hp, maxHp: hp, abilities, notes: 'Placeholder stats: replace with the character sheet.' });
+
+function demoTokens(map: DungeonMap, creatures: CreatureTemplate[], pocketLoot: (t: CreatureTemplate) => ItemStack[]): Token[] {
   const base = { mapId: map.id, position: { x: 0, y: 0 }, senses: {}, conditions: [], visibility: 'public' as const };
   const party: Token[] = [
-    { ...base, id: newTokenId(), label: 'Brannoc', color: '#0072b2', size: 'medium', speeds: { walk: 30 }, side: 'party', initiativeBonus: 1 },
-    { ...base, id: newTokenId(), label: 'Ilsa Vane', color: '#e69f00', size: 'medium', speeds: { walk: 30 }, side: 'party', initiativeBonus: 2 },
-    { ...base, id: newTokenId(), label: 'Tamsin', color: '#009e73', size: 'small', speeds: { walk: 30 }, side: 'party', initiativeBonus: 3 },
-    { ...base, id: newTokenId(), label: 'Old Grimm', color: '#cc79a7', size: 'medium', speeds: { walk: 30 }, side: 'party', initiativeBonus: 0 },
+    { ...base, id: newTokenId(), label: 'Brannoc', color: '#0072b2', size: 'medium', speeds: { walk: 30 }, side: 'party', stats: pc(18, 31, ab(16, 12, 15, 10, 12, 8)) },
+    { ...base, id: newTokenId(), label: 'Ilsa Vane', color: '#e69f00', size: 'medium', speeds: { walk: 30 }, side: 'party', stats: pc(12, 17, ab(8, 14, 13, 17, 12, 10)) },
+    { ...base, id: newTokenId(), label: 'Tamsin', color: '#009e73', size: 'small', speeds: { walk: 30 }, side: 'party', stats: pc(15, 22, ab(10, 17, 13, 12, 12, 13)) },
+    { ...base, id: newTokenId(), label: 'Old Grimm', color: '#cc79a7', size: 'medium', speeds: { walk: 30 }, side: 'party', stats: pc(17, 27, ab(14, 10, 15, 10, 16, 11)) },
   ];
-  const foes: Token[] = [
-    { ...base, id: newTokenId(), label: 'Ogre', color: '#d55e00', size: 'large', speeds: { walk: 40 }, side: 'enemy', initiativeBonus: -1, behavior: 'guard', leash: 6 },
-    { ...base, id: newTokenId(), label: 'Goblin Boss', color: '#56b4e9', size: 'small', speeds: { walk: 30 }, side: 'enemy', initiativeBonus: 2, behavior: 'guard', leash: 6 },
-  ];
+  const template = (id: string) => creatures.find((c) => c.id === id) ?? STARTER_CREATURES.find((c) => c.id === id)!;
+  const foes: Token[] = ['ogre', 'goblin-boss'].map((id) => {
+    const tpl = template(id);
+    const t = tokenFromTemplate(tpl, newTokenId(), map.id);
+    t.color = id === 'ogre' ? '#d55e00' : '#56b4e9';
+    t.behavior = 'guard';
+    t.leash = 6;
+    if (tpl.carriesLoot) t.inventory = pocketLoot(tpl);
+    return t;
+  });
   const placedParty = placeGroup(map, party, startPoint(map));
   // Foes wait in the room farthest from the entrance.
   const exit = map.objects.find((o) => o.kind === 'stairs' && o.role === 'exit');
@@ -72,6 +82,8 @@ export interface Encounter {
   removeToken: (id: string) => void;
   /** Add tokens (e.g. a random encounter). */
   addTokens: (ts: Token[]) => void;
+  /** Put a creature from the library on the map near the selected token (or the entrance). */
+  spawn: (template: CreatureTemplate) => Token;
   /** Interpolated position of a token mid-move (for drawing). */
   animating: React.RefObject<{ id: string; pos: Point } | null>;
   busy: boolean;
@@ -84,10 +96,13 @@ export interface EncounterOptions {
   onStep?: (token: Token, square: Point) => void;
   /** Called when a move finishes. */
   onMoveEnd?: () => void;
+  creatures: CreatureTemplate[];
+  /** Pocket loot for a creature that carries some. */
+  pocketLoot: (t: CreatureTemplate) => ItemStack[];
 }
 
 export function useEncounter(map: DungeonMap, requestDraw: () => void, opts: EncounterOptions): Encounter {
-  const [state, setState] = useState(() => ({ mapId: map.id, tokens: demoTokens(map) }));
+  const [state, setState] = useState(() => ({ mapId: map.id, tokens: demoTokens(map, opts.creatures, opts.pocketLoot) }));
   // New map: re-place the cast (keeping names and portraits).
   if (state.mapId !== map.id) {
     const relocated = placeGroup(
@@ -259,7 +274,7 @@ export function useEncounter(map: DungeonMap, requestDraw: () => void, opts: Enc
     const t: Token = {
       id: newTokenId(),
       mapId: map.id,
-      label: `Hero ${tokens.length + 1}`,
+      label: `Hero ${tokens.filter((x) => x.side === 'party').length + 1}`,
       color: '#999999',
       size: 'medium',
       position: { x: 0, y: 0 },
@@ -268,6 +283,7 @@ export function useEncounter(map: DungeonMap, requestDraw: () => void, opts: Enc
       side: 'party',
       conditions: [],
       visibility: 'public',
+      stats: { ac: 12, hp: 10, maxHp: 10, abilities: ab(10, 10, 10, 10, 10, 10) },
     };
     const near = selected?.position ?? startPoint(map);
     const [placed] = placeGroup(map, [t], near, tokens);
@@ -276,6 +292,17 @@ export function useEncounter(map: DungeonMap, requestDraw: () => void, opts: Enc
   };
 
   const addTokens = (ts: Token[]) => setTokens((cur) => [...cur, ...ts]);
+
+  const spawn = (tpl: CreatureTemplate) => {
+    const t = tokenFromTemplate(tpl, newTokenId(), map.id);
+    if (tpl.carriesLoot) t.inventory = opts.pocketLoot(tpl);
+    const near = selected?.position ?? startPoint(map);
+    const [placed] = placeGroup(map, [t], near, tokens);
+    const withHome = placed.behavior === 'guard' ? { ...placed, home: placed.position } : placed;
+    setTokens((ts) => [...ts, withHome]);
+    setSelectedId(withHome.id);
+    return withHome;
+  };
 
   const removeToken = (id: string) => {
     setTokens((ts) => ts.filter((t) => t.id !== id));
@@ -315,6 +342,7 @@ export function useEncounter(map: DungeonMap, requestDraw: () => void, opts: Enc
     updateToken,
     addToken,
     addTokens,
+    spawn,
     removeToken,
     animating,
     busy,
