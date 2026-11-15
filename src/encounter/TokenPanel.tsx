@@ -15,7 +15,18 @@ function Avatar({ t }: { t: Token }) {
   );
 }
 
-export function TokenPanel({ enc }: { enc: Encounter }) {
+export function TokenPanel({
+  enc,
+  onNewRound,
+  hideFromPlayers,
+  children,
+}: {
+  enc: Encounter;
+  onNewRound: () => void;
+  /** In player view: tokens the players can't currently see are left out of the list. */
+  hideFromPlayers?: (t: Token) => boolean;
+  children?: React.ReactNode;
+}) {
   const fileInput = useRef<HTMLInputElement>(null);
   const [uploadFor, setUploadFor] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -39,6 +50,8 @@ export function TokenPanel({ enc }: { enc: Encounter }) {
 
   return (
     <aside className="token-panel" aria-label="Tokens">
+      {children}
+      <h2>Tokens</h2>
       <div className="panel-actions">
         <button type="button" onClick={enc.addToken}>
           + Add token
@@ -46,7 +59,7 @@ export function TokenPanel({ enc }: { enc: Encounter }) {
         <button type="button" onClick={enc.undo} disabled={!enc.canUndo}>
           Undo move
         </button>
-        <button type="button" onClick={enc.newRound} title="Reset everyone's movement">
+        <button type="button" onClick={onNewRound} title="Reset everyone's movement">
           New round
         </button>
       </div>
@@ -57,7 +70,7 @@ export function TokenPanel({ enc }: { enc: Encounter }) {
         </p>
       )}
       <ul className="token-list">
-        {enc.tokens.map((t) => {
+        {enc.tokens.filter((t) => !hideFromPlayers?.(t)).map((t) => {
           const selected = enc.selected?.id === t.id;
           return (
             <li key={t.id} className={selected ? 'token-row selected' : 'token-row'}>
@@ -151,7 +164,9 @@ export function TokenPanel({ enc }: { enc: Encounter }) {
             <li key={a}>{a}</li>
           ))}
         </ul>
-        <p>Hold Shift when clicking to override the rules and place a token anywhere.</p>
+        <p>Hold Shift when clicking a square to override the rules and place the selected token anywhere.</p>
+        <p>Doors: click (or right-click) to open/close, Shift-click to lock/unlock, or press O next to one.</p>
+        <p>Sight is simple line of sight within the party's sight range. It doesn't model light or darkvision.</p>
         <p>Token rings: party = solid, enemy = spiked, neutral = dashed.</p>
       </details>
     </aside>

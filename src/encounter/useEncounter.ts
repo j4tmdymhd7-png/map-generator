@@ -1,6 +1,6 @@
 import { useCallback, useMemo, useRef, useState } from 'react';
 import { placeGroup, startPoint } from '../core/encounter/placement';
-import { DEFAULT_GRID_POLICY, type DungeonMap, type Point, type RoomObject, type Token } from '../core/model/types';
+import type { DungeonMap, GridPolicy, Point, RoomObject, Token } from '../core/model/types';
 import { rectCenter } from '../core/model/grid';
 import { buildMoveGrid, describeAssumptions, footprintSquares } from '../core/rules/dnd2024';
 import { computeReach, pathTo, reachableDestinations, type PathResult } from '../core/rules/pathfinding';
@@ -55,13 +55,23 @@ export interface Encounter {
   updateToken: (id: string, patch: Partial<Token>) => void;
   addToken: () => void;
   removeToken: (id: string) => void;
+  /** Add tokens (e.g. a random encounter). */
+  addTokens: (ts: Token[]) => void;
   /** Interpolated position of a token mid-move (for drawing). */
   animating: React.RefObject<{ id: string; pos: Point } | null>;
   busy: boolean;
   assumptions: string[];
 }
 
-export function useEncounter(map: DungeonMap, requestDraw: () => void): Encounter {
+export interface EncounterOptions {
+  policy: GridPolicy;
+  /** Called each time a moving token enters a new square (for fog and doors). */
+  onStep?: (token: Token, square: Point) => void;
+  /** Called when a move finishes. */
+  onMoveEnd?: () => void;
+}
+
+export function useEncounter(map: DungeonMap, requestDraw: () => void, opts: EncounterOptions): Encounter {
   const [state, setState] = useState(() => ({ mapId: map.id, tokens: demoTokens(map) }));
   // New map: re-place the cast (keeping names and portraits).
   if (state.mapId !== map.id) {
@@ -85,7 +95,7 @@ export function useEncounter(map: DungeonMap, requestDraw: () => void): Encounte
   const [history, setHistory] = useState<MoveRecord[]>([]);
   const [busy, setBusy] = useState(false);
   const animating = useRef<{ id: string; pos: Point } | null>(null);
-  const policy = DEFAULT_GRID_POLICY;
+  const policy = opts.policy;
 
   const selected = tokens.find((t) => t.id === selectedId) ?? null;
   const remaining = useCallback((t: Token) => Math.max(0, t.speeds.walk - (spent[t.id] ?? 0)), [spent]);
@@ -125,16 +135,22 @@ export function useEncounter(map: DungeonMap, requestDraw: () => void): Encounte
     setBusy(true);
     const t0 = performance.now();
     const pts = [from, ...steps];
+    let entered = 0;
     const tick = (now: number) => {
       // rAF timestamps are the frame start, which can be slightly before t0.
       const f = Math.max(0, now - t0) / STEP_MS;
       const i = Math.min(Math.floor(f), pts.length - 1);
+      while (entered < i) {
+        entered++;
+        opts.onStep?.(mover, pts[entered]);
+      }
       if (i >= pts.length - 1) {
         animating.current = null;
         setTokens((ts) => ts.map((t) => (t.id === mover.id ? { ...t, position: target } : t)));
         setSpent((sp) => ({ ...sp, [mover.id]: (sp[mover.id] ?? 0) + cost }));
         setHistory((h) => [...h, { tokenId: mover.id, from, spentBefore: spent[mover.id] ?? 0 }]);
         setBusy(false);
+        opts.onMoveEnd?.();
         requestDraw();
         return;
       }
@@ -186,6 +202,8 @@ export function useEncounter(map: DungeonMap, requestDraw: () => void): Encounte
     setSelectedId(placed.id);
   };
 
+  const addTokens = (ts: Token[]) => setTokens((cur) => [...cur, ...ts]);
+
   const removeToken = (id: string) => {
     setTokens((ts) => ts.filter((t) => t.id !== id));
     setHistory((h) => h.filter((m) => m.tokenId !== id));
@@ -205,6 +223,7 @@ export function useEncounter(map: DungeonMap, requestDraw: () => void): Encounte
     newRound,
     updateToken,
     addToken,
+    addTokens,
     removeToken,
     animating,
     busy,

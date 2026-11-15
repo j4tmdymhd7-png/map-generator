@@ -24,6 +24,13 @@ A browser-based 2D dungeon authoring and encounter tool for D&D (2024 rules). Ge
 - Click to move: the token hops square by square along the path. Arrow keys plus Home/PgUp/End/PgDn move one square at a time. Shift-click is the DM override. There's undo and a "new round" reset.
 - The side panel adds and removes tokens and sets portrait, name, side, size, speed and color.
 
+**Milestone 4a — doors, fog of war, random encounters (done).**
+
+- **Doors:** tokens open closed doors as they walk through (a setting). Click or right-click a door to open or close it, press O next to one, or Shift-click to lock or unlock (DM). Locked doors always block.
+- **Fog of war:** line of sight from party tokens within a sight range (30–120 ft). Walls, closed doors and pillars block sight, and you can't peek diagonally past corners. Squares are hidden, explored (dimmed) or visible. The fog lifts square by square as tokens walk.
+- **Player view:** unexplored squares are fully black, and non-party tokens only appear while someone can see them. The hover readout, path previews and token list never reveal what's hidden. DM view sees through the fog. Reveal-map and re-shroud buttons are included.
+- **Random encounters:** roll one now, or check each new round (off, 1 in 6, 1 in 4, 1 in 2). Monsters are placed in a room nobody has seen, at least 8 squares from the party. The creature table is a placeholder until real monster data is loaded.
+
 Next: editor tools and undo (M2b), tokens/initiative/movement UI (M3), fog of war + player view window (M4), then the vertical-slice playtest (M5).
 
 ## Scripts
