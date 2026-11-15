@@ -11,9 +11,12 @@ A browser-based 2D dungeon authoring and encounter tool for D&D (2024 rules). Ge
 - `src/core/generator` — seeded room-and-corridor generator + structural validator
 - `src/core/rng.ts` — deterministic seeded PRNG
 
-`src/App.tsx` is a temporary generator preview (type a seed, see the dungeon).
+**Milestone 2a — pen-and-ink renderer (done).** `src/renderer`:
 
-Next: canvas renderer + editor (M2), tokens/initiative/movement UI (M3), fog of war + player view window (M4), then the vertical-slice playtest (M5).
+- `ink.ts` draws walls as hand-inked lines, crosshatched rock, paper grain, numbered rooms, and symbols for doors (closed, open, locked), stairs, pits, hazards, pillars and rubble (difficult terrain). It is deliberately monochrome, so meaning is carried by line and symbol, not color.
+- `MapView.tsx` adds pan (drag or arrow keys), zoom (wheel, pinch, or +/−), fit (0), and a hovered-square readout. The map is rasterized to a cached bitmap and re-sharpened after zooming.
+
+Next: editor tools and undo (M2b), tokens/initiative/movement UI (M3), fog of war + player view window (M4), then the vertical-slice playtest (M5).
 
 ## Scripts
 
