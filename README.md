@@ -48,7 +48,7 @@ A browser-based 2D dungeon authoring and encounter tool for D&D (2024 rules). Ge
 
 | Size | Types | Grid |
 |---|---|---|
-| Small | Tavern / inn, Manor | 28×22, 38×30 |
+| Small | Tavern / inn, Manor | 28×26, 38×30 |
 | Medium | Dungeon, Caves | 40×40 |
 | Large | Dungeon, Cave system | 80×80 |
 | Huge | Town, Forest | 120×120 |
@@ -76,6 +76,13 @@ A browser-based 2D dungeon authoring and encounter tool for D&D (2024 rules). Ge
 - **Preview as players** shows the same thing in the DM window.
 - One toolbar: campaign menu, map menu, New map (now a dialog), People & places, Library, View (grid, room numbers, fog), Preview, Player screen, save status and **?** help.
 - Side-panel settings fold into Exploration, Loot and Random encounters sections. Instructions moved into tooltips and a **How to use** screen (shown once on first visit, then from **?**).
+
+**Interiors, version 3 (contributed, with fixes).**
+
+- Tables are 2×2 with chairs grouped around them, facing in, and aisles between groups. Rooms also get benches (temple pews, barracks), cabinets and rugs. Chairs and benches are difficult terrain, cabinets block movement, and rugs are just decoration.
+- Every doorway keeps a clear approach square inside it.
+- Taverns and inns: the common room opens onto a rear hall, and every other room has its own door off it. Inns have rooms on both sides of the hall (a passage from the common room runs between the front rooms), so they get five or more guest rooms.
+- The same seed now makes a different tavern or manor than in earlier versions. Saved campaigns are unaffected, because saves keep the whole map.
 
 Next: NPC routines and the world clock, editor tools and undo (M2b), and importing monster stats into the private library.
 

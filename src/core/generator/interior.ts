@@ -59,7 +59,7 @@ interface Plan {
 
 const PLANS: Record<InteriorKind, Plan> = {
   tavern: { title: 'Tavern', w: 28, h: 26, front: 0.42, maxRooms: 6, main: 'Common room', others: ['Kitchen', 'Storeroom', 'Guest room', 'Guest room', 'Private room', 'Guest room', 'Guest room', 'Pantry'] },
-  inn: { title: 'Inn', w: 32, h: 26, front: 0.42, maxRooms: 9, main: 'Common room', others: ['Kitchen', 'Storeroom', 'Guest room', 'Guest room', 'Guest room', 'Guest room', 'Private room', 'Guest room', 'Pantry'] },
+  inn: { title: 'Inn', w: 32, h: 32, front: 0.42, maxRooms: 9, main: 'Common room', others: ['Kitchen', 'Storeroom', 'Guest room', 'Guest room', 'Guest room', 'Guest room', 'Private room', 'Guest room', 'Pantry'] },
   manor: {
     title: 'Manor',
     w: 38,
@@ -150,9 +150,11 @@ class Furnisher {
   place(room: Rect, type: FurnitureType, r: Rect, facing?: FurnitureFacing): boolean {
     const m = this.map;
     const doors = this.map.objects.filter((o): o is DoorObject => o.kind === 'door');
+    const c = rectCenter(room);
     for (let y = r.y; y < r.y + r.h; y++)
       for (let x = r.x; x < r.x + r.w; x++) {
-        if (!rectContains(room, { x, y })) return false;
+        // Solid pieces never take the room's center: validation and room labels use it.
+        if (!rectContains(room, { x, y }) || (SOLID[type] && x === c.x && y === c.y)) return false;
         // Keep an approach square and a turning square clear inside every doorway.
         if (doors.some((door) => {
           const dx = x - door.at.x;
@@ -293,8 +295,9 @@ class Furnisher {
       case 'Nave':
         this.place(room, 'counter', { x: x + Math.floor(w / 2) - 1, y: y + h - 1, w: 3, h: 1 }); // altar at the far end
         for (let ty = y + 2; ty < y + h - 3; ty += 2) {
-          this.place(room, 'table', { x: x + 1, y: ty, w: Math.max(1, Math.floor(w / 2) - 2), h: 1 });
-          this.place(room, 'table', { x: x + Math.floor(w / 2) + 2, y: ty, w: Math.max(1, Math.ceil(w / 2) - 3), h: 1 });
+          // Pews either side of a center aisle
+          this.place(room, 'bench', { x: x + 1, y: ty, w: Math.max(1, Math.floor(w / 2) - 2), h: 1 });
+          this.place(room, 'bench', { x: x + Math.floor(w / 2) + 2, y: ty, w: Math.max(1, Math.ceil(w / 2) - 3), h: 1 });
         }
         break;
       case 'Vestry':
@@ -312,6 +315,7 @@ class Furnisher {
         break;
       case 'Bunk room':
         for (let b = 0; b * 2 < w; b++) this.place(room, 'bed', { x: x + b * 2, y, w: 1, h: 2 });
+        this.place(room, 'bench', { x: x + 1, y: y + h - 1, w: Math.min(3, w - 2), h: 1 });
         break;
       case 'Armory':
         this.alongWall(room, 'shelf', w + h);
@@ -321,7 +325,10 @@ class Furnisher {
       case 'Main room':
         if (role !== 'Guard room') this.place(room, 'hearth', { x: x + w - 1, y: y + Math.floor(h / 2) - 1, w: 1, h: 2 });
         tables(4, 3);
-        if (role === 'Guard room') this.alongWall(room, 'shelf', 2);
+        if (role === 'Guard room') {
+          this.alongWall(room, 'shelf', 2);
+          this.place(room, 'bench', { x: x + 1, y: y + h - 2, w: Math.min(4, w - 2), h: 1 });
+        }
         break;
       case 'Hideout':
         tables(4, 3);
@@ -342,7 +349,7 @@ class Furnisher {
         break;
       case 'Chapel':
         this.place(room, 'counter', { x: x + Math.floor(w / 2) - 1, y, w: 2, h: 1 }); // altar
-        tables(3, 2); // pews
+        for (let ty = y + 2; ty < y + h - 1; ty += 2) this.place(room, 'bench', { x: x + 1, y: ty, w: Math.max(1, w - 2), h: 1 }); // pews
         break;
       default:
         tables(4, 3);
@@ -381,26 +388,53 @@ export function generateInterior(seed: string, kind: InteriorKind): GenerateResu
   const maxRooms = plan.maxRooms;
   const guidedInn = (kind === 'tavern' || kind === 'inn') && back.h >= 7 && inner.w >= 18;
   const mainToHallX = inner.x + Math.floor(inner.w / 2);
-  if (guidedInn) {
-    // A public room opens to a clear rear hall. Service rooms and guest rooms
-    // line the hall, rather than being nested behind arbitrary BSP partitions.
-    const hallY = back.y;
-    const roomWallY = hallY + 2;
-    const roomY = roomWallY + 1;
-    const roomH = inner.y + inner.h - roomY;
-    const roomCount = Math.min(maxRooms - 1, plan.others.length, Math.floor(inner.w / 5));
-    const baseW = Math.floor(inner.w / roomCount);
-    let x = inner.x;
-    for (let i = 0; i < roomCount; i++) {
-      const w = i === roomCount - 1 ? inner.x + inner.w - x : baseW;
-      const room = { x, y: roomY, w, h: roomH };
-      leaves.push(room);
-      splits.push({ vertical: false, line: roomWallY, from: x, to: x + w - 1 });
-      if (i > 0) splits.push({ vertical: true, line: x, from: roomY, to: roomY + roomH - 1, door: false });
-      x += w;
+  /**
+   * A row of rooms across [x0, x1), each at least MIN_ROOM wide, divided by
+   * walls with no doors; each room gets one door in `doorLine` (a hall wall).
+   */
+  const roomRow = (x0: number, x1: number, y: number, h: number, doorLine: number, limit: number) => {
+    const total = x1 - x0;
+    const n = Math.max(1, Math.min(limit, Math.floor((total + 1) / (MIN_ROOM + 1))));
+    if (limit <= 0 || total < MIN_ROOM) return;
+    const floorW = total - (n - 1);
+    const base = Math.floor(floorW / n);
+    const extra = floorW - base * n;
+    let x = x0;
+    for (let i = 0; i < n; i++) {
+      const w = base + (i < extra ? 1 : 0);
+      leaves.push({ x, y, w, h });
+      splits.push({ vertical: false, line: doorLine, from: x, to: x + w - 1 });
+      // Dividers run into the hall wall too, so it has no gaps where they meet.
+      if (i < n - 1) splits.push({ vertical: true, line: x + w, from: Math.min(y, doorLine), to: Math.max(y + h - 1, doorLine), door: false });
+      x += w + 1;
     }
-    // Cross walls give each room one door directly off the hall.
-    splits.push({ vertical: false, line: hallY + 2, from: inner.x, to: inner.x + inner.w - 1, door: false });
+  };
+  const roomBudget = () => Math.min(maxRooms - 1, plan.others.length) - leaves.length;
+  if (guidedInn) {
+    // The common room opens onto a rear hall, and every other room has its
+    // own door off the hall. Inns with room for it get rooms on both sides.
+    const doubleLoaded = back.h >= 2 * MIN_ROOM + 4;
+    if (doubleLoaded) {
+      // [rooms A] wall [hall ×2] wall [rooms B]; a passage from the common room
+      // runs between the A rooms to the hall.
+      const hA = Math.floor((back.h - 4) / 2);
+      const wallA = back.y + hA;
+      const hallY = wallA + 1;
+      const wallB = hallY + 2;
+      const yB = wallB + 1;
+      const hB = back.y + back.h - yB;
+      const px = mainToHallX;
+      splits.push({ vertical: true, line: px - 1, from: back.y, to: wallA, door: false });
+      splits.push({ vertical: true, line: px + 1, from: back.y, to: wallA, door: false });
+      roomRow(inner.x, inner.x + inner.w, yB, hB, wallB, roomBudget());
+      const half = roomBudget();
+      roomRow(inner.x, px - 1, back.y, hA, wallA, Math.ceil(half / 2));
+      roomRow(px + 2, inner.x + inner.w, back.y, hA, wallA, roomBudget());
+    } else {
+      const hallY = back.y;
+      const wall = hallY + 2;
+      roomRow(inner.x, inner.x + inner.w, wall + 1, inner.y + inner.h - wall - 1, wall, roomBudget());
+    }
   } else if (back.h >= 2) {
     bsp(rng, back, 0, (r, d) => r.w * r.h <= (kind === 'cottage' ? 60 : 30) || (d >= 2 && rng.chance(0.35)) || leaves.length >= maxRooms - 1, leaves, splits);
   }
@@ -418,6 +452,7 @@ export function generateInterior(seed: string, kind: InteriorKind): GenerateResu
   const doors: DoorObject[] = [];
   let dn = 0;
   for (const s of splits) {
+    if (s.door === false) continue;
     const options: Point[] = [];
     for (let k = s.from; k <= s.to; k++) {
       const p = s.vertical ? { x: s.line, y: k } : { x: k, y: s.line };
@@ -427,7 +462,6 @@ export function generateInterior(seed: string, kind: InteriorKind): GenerateResu
     }
     if (!options.length) continue;
     const preferred = s === frontSplit ? options.find((p) => p.x === mainToHallX) : undefined;
-    if (s.door === false) continue;
     const p = preferred ?? rng.pick(options);
     map.terrain[idx(map, p.x, p.y)] = 'door';
     doors.push({ id: `door-${++dn}`, kind: 'door', at: p, state: rng.chance(0.4) ? 'open' : 'closed', visibility: 'public' });
