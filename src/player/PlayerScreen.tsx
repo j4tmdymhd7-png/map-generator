@@ -58,7 +58,7 @@ export function PlayerScreen() {
 
   return (
     <div className="player-screen">
-      <MapView map={state.map} showGrid roomNumbers={false} overlay={overlay} controllerRef={controller} />
+      <MapView map={state.map} showGrid roomNumbers={false} palette={state.palette} overlay={overlay} controllerRef={controller} />
       <div className="player-caption" aria-live="polite">
         {state.map.title}
         {gone && <span> · DM window closed</span>}

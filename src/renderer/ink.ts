@@ -6,9 +6,14 @@
  * the map seed and the square (or wall stroke) being drawn, so any tile, at
  * any zoom, draws exactly the same as its neighbours and as the whole map.
  *
- * Dungeon interiors retain their parchment-and-ink treatment. Natural maps
- * use continuous colored terrain contours, with the tactical grid drawn as a
- * separate overlay above the illustration.
+ * Two looks:
+ * - Ink (default): monochrome parchment and ink everywhere. Meaning is carried
+ *   by line, pattern and symbol, never by hue.
+ * - Color (outdoor maps only): colored terrain outlines for ground, water and
+ *   roads, green trees and tiled roofs. Every terrain that matters for the
+ *   rules keeps its own pattern (water ripples and stipple, brush, trees, road
+ *   edges), so color is never the only cue. Dungeons, caves and interiors are
+ *   always drawn in ink.
  */
 import { idx, isDifficult, terrainAt } from '../core/model/grid';
 import type { DoorState, DungeonMap, FurnitureObject, LootObject, MapStyle, Point, RoomObject, StructureObject, Terrain } from '../core/model/types';
@@ -29,7 +34,12 @@ export interface InkOptions {
   cell: number;
   grid: boolean;
   roomNumbers: boolean;
+  /** 'color' gives outdoor maps the illustrated look; everything else stays ink. */
+  palette?: MapPalette;
 }
+
+export const MAP_PALETTES = ['ink', 'color'] as const;
+export type MapPalette = (typeof MAP_PALETTES)[number];
 
 /** Squares [x0, x1) × [y0, y1). */
 export interface Region {
@@ -143,13 +153,13 @@ function terrainContour(map: DungeonMap, include: (terrain: Terrain) => boolean,
       edge.used = true;
       points.push({ x: edge.x2, y: edge.y2 });
       if (edge.x2 === start.x1 && edge.y2 === start.y1) break;
-      const choices = (outgoing.get(key(edge.x2, edge.y2)) ?? []).filter((candidate) => !candidate.used);
+      const choices: Edge[] = (outgoing.get(key(edge.x2, edge.y2)) ?? []).filter((candidate) => !candidate.used);
       const dir = direction(edge);
       const rank = (candidate: Edge) => {
         const turn = (direction(candidate) - dir + 4) % 4;
         return turn === 1 ? 0 : turn === 0 ? 1 : turn === 3 ? 2 : 3;
       };
-      choices.sort((a, b) => rank(a) - rank(b));
+      choices.sort((a: Edge, b: Edge) => rank(a) - rank(b));
       edge = choices[0];
     }
     if (points.length >= 5 && points[0].x === points[points.length - 1].x && points[0].y === points[points.length - 1].y) contours.push(points.slice(0, -1));
@@ -296,10 +306,10 @@ function isUrban(map: DungeonMap): boolean {
   return kind === 'town' || kind === 'city';
 }
 
-function drawPaper(ctx: Ctx, map: DungeonMap, p: Pre, c: number, r: Region) {
-  ctx.fillStyle = p.style === 'outdoor' ? (isUrban(map) ? '#aaa28f' : '#718052') : INK.paper;
+function drawPaper(ctx: Ctx, map: DungeonMap, p: Pre, c: number, r: Region, color: boolean) {
+  ctx.fillStyle = color ? (isUrban(map) ? '#aaa28f' : '#718052') : INK.paper;
   ctx.fillRect(r.x0 * c, r.y0 * c, (r.x1 - r.x0) * c, (r.y1 - r.y0) * c);
-  if (p.style === 'outdoor') return;
+  if (color) return;
   forCells(map, r, 0, (x, y) => {
     const rng = rngAt(p.seed, SALT.paper, x, y);
     for (let k = 0; k < 3; k++) {
@@ -311,8 +321,8 @@ function drawPaper(ctx: Ctx, map: DungeonMap, p: Pre, c: number, r: Region) {
 }
 
 /** Crosshatch in the rock around walls (dungeons), on walls (interiors), and over whole buildings (outdoors). */
-function drawHatching(ctx: Ctx, map: DungeonMap, p: Pre, c: number, r: Region) {
-  if (p.style === 'outdoor') return;
+function drawHatching(ctx: Ctx, map: DungeonMap, p: Pre, c: number, r: Region, color: boolean) {
+  if (color) return;
   const keep = p.style === 'dungeon' ? [0, 1, 0.6, 0.18, 0] : p.style === 'interior' ? [0, 1, 0, 0, 0] : [0, 1, 1, 1, 1];
   ctx.strokeStyle = p.style === 'outdoor' ? 'rgba(42, 36, 31, 0.6)' : INK.hatch;
   ctx.lineWidth = Math.max(0.6, c * 0.035);
@@ -348,7 +358,7 @@ function drawHatching(ctx: Ctx, map: DungeonMap, p: Pre, c: number, r: Region) {
   });
 }
 
-function drawFloor(ctx: Ctx, map: DungeonMap, p: Pre, c: number, r: Region) {
+function drawFloor(ctx: Ctx, map: DungeonMap, p: Pre, c: number, r: Region, grid: boolean, color: boolean) {
   // Open squares in this region, as one path (rows of runs).
   const open = new Path2D();
   for (let y = Math.max(0, r.y0 - 1); y < Math.min(map.height, r.y1 + 1); y++) {
@@ -362,10 +372,17 @@ function drawFloor(ctx: Ctx, map: DungeonMap, p: Pre, c: number, r: Region) {
       }
     }
   }
-  ctx.fillStyle = p.style === 'outdoor' ? (isUrban(map) ? '#c0b59a' : '#85935e') : INK.floor;
+  ctx.fillStyle = color ? (isUrban(map) ? '#c0b59a' : '#85935e') : INK.floor;
   ctx.fill(open);
   ctx.save();
   ctx.clip(open);
+  // Ink: roads are a shade darker than open ground. (Color draws them as outlines.)
+  if (!color && p.style !== 'dungeon') {
+    ctx.fillStyle = INK.road;
+    forCells(map, r, 1, (x, y, i) => {
+      if (map.terrain[i] === 'road') ctx.fillRect(x * c, y * c, c, c);
+    });
+  }
   // Soft shadow inside every wall.
   ctx.fillStyle = INK.shadow;
   const s = c * 0.16;
@@ -379,17 +396,34 @@ function drawFloor(ctx: Ctx, map: DungeonMap, p: Pre, c: number, r: Region) {
       ctx.fillRect(right ? g.x1 * c : g.x1 * c - s, g.y1 * c, s, (g.y2 - g.y1) * c);
     }
   }
+  // Ink: a dashed grid on open floor, under everything else.
+  if (grid && !color) {
+    ctx.strokeStyle = INK.grid;
+    ctx.lineWidth = Math.max(0.5, c * 0.025);
+    ctx.setLineDash([c * 0.12, c * 0.1]);
+    ctx.beginPath();
+    for (let x = r.x0; x <= r.x1; x++) {
+      ctx.moveTo(x * c, r.y0 * c);
+      ctx.lineTo(x * c, r.y1 * c);
+    }
+    for (let y = r.y0; y <= r.y1; y++) {
+      ctx.moveTo(r.x0 * c, y * c);
+      ctx.lineTo(r.x1 * c, y * c);
+    }
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
   ctx.restore();
 }
 
 function drawNaturalSurfaces(ctx: Ctx, map: DungeonMap, p: Pre, c: number, r: Region) {
-  if (p.style === 'outdoor') {
+  {
     const water = naturalPath(map, p, 'water', (t) => t === 'water', r);
     const deepwater = naturalPath(map, p, 'deepwater', (t) => t === 'deepwater', r);
     const road = naturalPath(map, p, 'road', (t) => t === 'road', r);
     ctx.fillStyle = '#275c64'; fillMapPath(ctx, deepwater, c);
     ctx.fillStyle = '#3b7477'; fillMapPath(ctx, water, c);
-    ctx.fillStyle = isUrban(map) ? '#776d5d' : '#796c4d'; fillMapPath(ctx, road, c);
+    ctx.fillStyle = isUrban(map) ? STREET : '#796c4d'; fillMapPath(ctx, road, c);
     ctx.lineWidth = 0.035;
     ctx.strokeStyle = 'rgba(35, 48, 39, 0.42)';
     strokeMapPath(ctx, road, c);
@@ -403,18 +437,16 @@ function drawTacticalGrid(ctx: Ctx, map: DungeonMap, c: number, r: Region, p: Pr
   const open = new Path2D();
   forCells(map, r, 0, (x, y, i) => {
     const terrain = map.terrain[i];
-    const outdoorOpen = p.style === 'outdoor' && terrain !== 'tree' && terrain !== 'obstacle' && !p.structureCells.has(i);
-    if (isOpenAt(map, x, y) && (p.style !== 'outdoor' || outdoorOpen)) open.rect(x * c, y * c, c, c);
+    if (isOpenAt(map, x, y) && terrain !== 'tree' && terrain !== 'obstacle' && !p.structureCells.has(i)) open.rect(x * c, y * c, c, c);
   });
   ctx.save(); ctx.clip(open);
-  ctx.strokeStyle = p.style === 'outdoor' ? 'rgba(31, 38, 31, 0.28)' : INK.grid;
+  ctx.strokeStyle = 'rgba(31, 38, 31, 0.28)';
   ctx.lineWidth = Math.max(0.45, c * 0.022);
-  ctx.setLineDash(p.style === 'outdoor' ? [] : [c * 0.16, c * 0.11]);
   ctx.beginPath();
   for (let x = r.x0; x <= r.x1; x++) { ctx.moveTo(x * c, r.y0 * c); ctx.lineTo(x * c, r.y1 * c); }
   for (let y = r.y0; y <= r.y1; y++) { ctx.moveTo(r.x0 * c, y * c); ctx.lineTo(r.x1 * c, y * c); }
   ctx.stroke();
-  ctx.setLineDash([]); ctx.restore();
+  ctx.restore();
 }
 
 function drawWalls(ctx: Ctx, p: Pre, c: number, r: Region) {
@@ -538,8 +570,12 @@ function drawRoadPebbles(ctx: Ctx, x: number, y: number, c: number, rng: R) {
   ctx.stroke();
 }
 
-function drawWater(ctx: Ctx, x: number, y: number, deep: boolean, c: number, rng: R) {
-  ctx.strokeStyle = deep ? 'rgba(18, 47, 58, 0.58)' : 'rgba(24, 65, 70, 0.45)';
+function drawWater(ctx: Ctx, x: number, y: number, deep: boolean, c: number, rng: R, color: boolean) {
+  if (!color) {
+    ctx.fillStyle = deep ? 'rgba(42, 36, 31, 0.2)' : 'rgba(42, 36, 31, 0.07)';
+    ctx.fillRect(x * c, y * c, c, c);
+  }
+  ctx.strokeStyle = color ? (deep ? 'rgba(18, 47, 58, 0.58)' : 'rgba(24, 65, 70, 0.45)') : deep ? 'rgba(42, 36, 31, 0.75)' : 'rgba(42, 36, 31, 0.55)';
   ctx.lineWidth = Math.max(0.6, c * 0.035);
   ctx.beginPath();
   const lines = deep ? 3 : 2;
@@ -552,7 +588,7 @@ function drawWater(ctx: Ctx, x: number, y: number, deep: boolean, c: number, rng
     ctx.quadraticCurveTo(x0 + w * 0.875, yy - c * 0.04, x0 + w, yy);
   }
   ctx.stroke();
-  if (!deep) {
+  if (!deep && color) {
     // Shallow water gets a stipple in addition to its two ripple lines, so it
     // remains distinct from deep water and ground without relying on hue.
     ctx.fillStyle = 'rgba(232, 235, 210, 0.62)';
@@ -1021,6 +1057,9 @@ function drawLoot(ctx: Ctx, loot: LootObject, c: number) {
 
 const ROOF = '#e4d8bb';
 const STONE = '#cbbd9c';
+/** Color look, towns: tiled roofs and streets far enough apart in brightness to read in grayscale too. */
+const ROOF_TILE = '#6f4630';
+const STREET = '#8c8270';
 
 /** A hip roof seen from above: ridge along the long side, hips to the corners, shading on two slopes. */
 function drawRoof(ctx: Ctx, rect: { x: number; y: number; w: number; h: number }, c: number, outdoor = false) {
@@ -1028,7 +1067,7 @@ function drawRoof(ctx: Ctx, rect: { x: number; y: number; w: number; h: number }
     y0 = rect.y * c,
     w = rect.w * c,
     h = rect.h * c;
-  ctx.fillStyle = outdoor ? '#8a6044' : ROOF;
+  ctx.fillStyle = outdoor ? ROOF_TILE : ROOF;
   ctx.fillRect(x0, y0, w, h);
   const horizontal = w >= h;
   const half = (horizontal ? h : w) / 2;
@@ -1158,9 +1197,9 @@ function drawTower(ctx: Ctx, st: StructureObject, c: number) {
   ctx.stroke();
 }
 
-function drawStructures(ctx: Ctx, map: DungeonMap, p: Pre, c: number, r: Region) {
+function drawStructures(ctx: Ctx, map: DungeonMap, p: Pre, c: number, r: Region, color: boolean) {
   const near = (st: StructureObject) => st.rect.x < r.x1 + 1 && st.rect.x + st.rect.w > r.x0 - 1 && st.rect.y < r.y1 + 1 && st.rect.y + st.rect.h > r.y0 - 1;
-  for (const st of p.structures) if (st.type === 'building' && near(st)) drawRoof(ctx, st.rect, c, p.style === 'outdoor');
+  for (const st of p.structures) if (st.type === 'building' && near(st)) drawRoof(ctx, st.rect, c, color);
   for (const st of p.structures) if (st.type === 'wall' && near(st)) drawWallStones(ctx, map, st, c, r);
 }
 
@@ -1169,13 +1208,13 @@ function drawTowers(ctx: Ctx, p: Pre, c: number, r: Region) {
     if (st.type === 'tower' && st.rect.x < r.x1 + 1 && st.rect.x + st.rect.w > r.x0 - 1 && st.rect.y < r.y1 + 1 && st.rect.y + st.rect.h > r.y0 - 1) drawTower(ctx, st, c);
 }
 
-function drawFeatures(ctx: Ctx, map: DungeonMap, p: Pre, c: number, r: Region) {
+function drawFeatures(ctx: Ctx, map: DungeonMap, p: Pre, c: number, r: Region, color: boolean) {
   // Ground-level texture first (it can spill a little into neighbouring squares).
   forCells(map, r, 1, (x, y, i) => {
     const t = map.terrain[i];
-    if (t === 'water' || t === 'deepwater') drawWater(ctx, x, y, t === 'deepwater', c, rngAt(p.seed, SALT.water, x, y));
+    if (t === 'water' || t === 'deepwater') drawWater(ctx, x, y, t === 'deepwater', c, rngAt(p.seed, SALT.water, x, y), color);
     else if (t === 'brush') drawBrush(ctx, x, y, c, rngAt(p.seed, SALT.brush, x, y));
-    else if (t === 'ground' && p.style !== 'dungeon' && !(p.style === 'outdoor' && isUrban(map))) drawGrass(ctx, x, y, c, rngAt(p.seed, SALT.grass, x, y));
+    else if (t === 'ground' && p.style !== 'dungeon' && !(color && isUrban(map))) drawGrass(ctx, x, y, c, rngAt(p.seed, SALT.grass, x, y));
     else if (t === 'road') drawRoadPebbles(ctx, x, y, c, rngAt(p.seed, SALT.road, x, y));
     if (isDifficult(map, x, y) && !p.furnitureCells.has(i) && (t === 'floor' || t === 'ground' || t === 'road'))
       drawRubble(ctx, x, y, c, rngAt(p.seed, SALT.rubble, x, y));
@@ -1205,9 +1244,9 @@ function drawFeatures(ctx: Ctx, map: DungeonMap, p: Pre, c: number, r: Region) {
   for (const l of p.loot) if (l.at.x >= r.x0 - 1 && l.at.x <= r.x1 && l.at.y >= r.y0 - 1 && l.at.y <= r.y1) drawLoot(ctx, l, c);
 }
 
-function drawTrees(ctx: Ctx, map: DungeonMap, p: Pre, c: number, r: Region) {
+function drawTrees(ctx: Ctx, map: DungeonMap, p: Pre, c: number, r: Region, color: boolean) {
   forCells(map, r, 1, (x, y, i) => {
-    if (map.terrain[i] === 'tree') drawTree(ctx, x, y, c, rngAt(p.seed, SALT.tree, x, y), p.style === 'outdoor');
+    if (map.terrain[i] === 'tree') drawTree(ctx, x, y, c, rngAt(p.seed, SALT.tree, x, y), color);
   });
 }
 
@@ -1245,20 +1284,21 @@ export function drawInkRegion(ctx: Ctx, map: DungeonMap, opts: InkOptions, r: Re
   ctx.beginPath();
   ctx.rect(r.x0 * c, r.y0 * c, (r.x1 - r.x0) * c, (r.y1 - r.y0) * c);
   ctx.clip();
-  drawPaper(ctx, map, p, c, r);
-  drawHatching(ctx, map, p, c, r);
-  drawFloor(ctx, map, p, c, r);
-  drawNaturalSurfaces(ctx, map, p, c, r);
-  // Outdoors place the optional tactical grid over walkable open terrain but
-  // below roofs, trees and objects so those remain legible.
-  if (opts.grid && p.style === 'outdoor') drawTacticalGrid(ctx, map, c, r, p);
-  if (p.style !== 'outdoor') drawRoadEdges(ctx, p, c, r);
-  drawStructures(ctx, map, p, c, r);
-  drawFeatures(ctx, map, p, c, r);
+  // The color look applies to outdoor maps only.
+  const color = opts.palette === 'color' && p.style === 'outdoor';
+  drawPaper(ctx, map, p, c, r, color);
+  drawHatching(ctx, map, p, c, r, color);
+  drawFloor(ctx, map, p, c, r, opts.grid, color);
+  if (color) {
+    drawNaturalSurfaces(ctx, map, p, c, r);
+    // The grid goes over open ground but under roofs, trees and objects.
+    if (opts.grid) drawTacticalGrid(ctx, map, c, r, p);
+  } else drawRoadEdges(ctx, p, c, r);
+  drawStructures(ctx, map, p, c, r, color);
+  drawFeatures(ctx, map, p, c, r, color);
   drawWalls(ctx, p, c, r);
   drawTowers(ctx, p, c, r);
-  drawTrees(ctx, map, p, c, r);
-  if (opts.grid && p.style !== 'outdoor') drawTacticalGrid(ctx, map, c, r, p);
+  drawTrees(ctx, map, p, c, r, color);
   if (opts.roomNumbers) drawRoomNumbers(ctx, map, p, c, r);
   ctx.restore();
 }

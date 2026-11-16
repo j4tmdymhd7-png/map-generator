@@ -4,13 +4,14 @@
  * tokens already filtered and renamed, places already filtered, and the fog.
  */
 import type { DungeonMap, Point, PoiObject, Token } from '../core/model/types';
+import type { MapPalette } from '../renderer/ink';
 
 export const PLAYER_CHANNEL = 'dmg-player-screen';
 export const PLAYER_HASH = '#players';
 
 export type PlayerMessage =
   | { type: 'hello' }
-  | { type: 'state'; map: DungeonMap; tokens: Token[]; pois: PoiObject[]; fog: Uint8Array | null; activeId: string | null; campaign: string }
+  | { type: 'state'; map: DungeonMap; tokens: Token[]; pois: PoiObject[]; fog: Uint8Array | null; activeId: string | null; campaign: string; palette?: MapPalette }
   | { type: 'anim'; anim: { id: string; pos: Point } | null }
   | { type: 'bye' };
 
