@@ -10,7 +10,7 @@
  * symbol, never by hue.
  */
 import { idx, isDifficult, terrainAt } from '../core/model/grid';
-import type { DoorState, DungeonMap, FurnitureObject, LootObject, MapStyle, RoomObject, StructureObject, Terrain } from '../core/model/types';
+import type { DoorState, DungeonMap, FurnitureObject, LootObject, MapStyle, Point, RoomObject, StructureObject, Terrain } from '../core/model/types';
 import { doorOrientation, isOpenAt, rockDistance, wallSegments, type Segment } from './geometry';
 
 export const INK = {
@@ -80,6 +80,42 @@ interface Pre {
   structureCells: Set<number>;
   loot: LootObject[];
   rooms: RoomObject[];
+  /** Wall corners (where a horizontal and a vertical run end together), drawn rounded. Empty outdoors. */
+  corners: Corner[];
+  cornerKeys: Set<string>;
+}
+
+interface Corner {
+  x: number;
+  y: number;
+  ends: [Point, Point];
+}
+
+const cornerKey = (x: number, y: number) => `${x},${y}`;
+
+/** Points where exactly one horizontal and one vertical wall run meet end to end. */
+export function wallCorners(segments: Segment[]): Corner[] {
+  const ends = new Map<string, { horizontal: boolean; at: Point; other: Point }[]>();
+  for (const g of segments) {
+    const horizontal = g.y1 === g.y2;
+    for (const [x, y, ox, oy] of [
+      [g.x1, g.y1, g.x2, g.y2],
+      [g.x2, g.y2, g.x1, g.y1],
+    ]) {
+      const k = cornerKey(x, y);
+      const list = ends.get(k) ?? [];
+      list.push({ horizontal, at: { x, y }, other: { x: ox, y: oy } });
+      ends.set(k, list);
+    }
+  }
+  const out: Corner[] = [];
+  for (const list of ends.values()) {
+    if (list.length !== 2) continue; // T and + junctions stay square
+    const h = list.find((e) => e.horizontal);
+    const v = list.find((e) => !e.horizontal);
+    if (h && v) out.push({ x: h.at.x, y: h.at.y, ends: [h.other, v.other] });
+  }
+  return out;
 }
 
 const preCache = new WeakMap<DungeonMap, Pre>();
@@ -129,10 +165,15 @@ function pre(map: DungeonMap): Pre {
   for (const o of map.objects) if (o.kind === 'door') doors.set(idx(map, o.at.x, o.at.y), o.state);
   const style = map.style ?? 'dungeon';
   const ground = (t: Terrain) => t === 'ground' || t === 'brush' || t === 'tree';
+  const segments = wallSegments(map);
+  // Rounded corners suit carved rock and plastered rooms; town walls and houses stay square.
+  const corners = style === 'outdoor' ? [] : wallCorners(segments);
   p = {
     seed: hashString(`ink:${map.generation?.seed ?? map.id}`),
     style,
-    segments: wallSegments(map),
+    segments,
+    corners,
+    cornerKeys: new Set(corners.map((k) => cornerKey(k.x, k.y))),
     roadEdges: style === 'outdoor' ? edgeSegments(map, (t) => t === 'road', ground) : [],
     rockDist: rockDistance(map, 3),
     doors,
@@ -305,7 +346,22 @@ function drawWalls(ctx: Ctx, p: Pre, c: number, r: Region) {
       if (!segIn(g, r)) continue;
       const rng = segRng(p, g);
       if (pass === 1) for (let k = 0; k < 64; k++) rng(); // a different wobble for the second pass
-      penLine(ctx, rng, g.x1 * c, g.y1 * c, g.x2 * c, g.y2 * c, c * 0.05);
+      // Stop short of rounded corners (0.2 of a square); the curve joins them.
+      const TRIM = 0.2;
+      const horizontal = g.y1 === g.y2;
+      const t1 = p.cornerKeys.has(cornerKey(g.x1, g.y1)) ? TRIM : 0;
+      const t2 = p.cornerKeys.has(cornerKey(g.x2, g.y2)) ? TRIM : 0;
+      const x1 = g.x1 + (horizontal ? t1 : 0),
+        x2 = g.x2 - (horizontal ? t2 : 0),
+        y1 = g.y1 + (horizontal ? 0 : t1),
+        y2 = g.y2 - (horizontal ? 0 : t2);
+      penLine(ctx, rng, x1 * c, y1 * c, x2 * c, y2 * c, c * 0.025);
+    }
+    for (const corner of p.corners) {
+      if (corner.x < r.x0 - 1 || corner.x > r.x1 + 1 || corner.y < r.y0 - 1 || corner.y > r.y1 + 1) continue;
+      const ends = corner.ends;
+      ctx.moveTo((corner.x + (ends[0].x - corner.x) * 0.2) * c, (corner.y + (ends[0].y - corner.y) * 0.2) * c);
+      ctx.quadraticCurveTo(corner.x * c, corner.y * c, (corner.x + (ends[1].x - corner.x) * 0.2) * c, (corner.y + (ends[1].y - corner.y) * 0.2) * c);
     }
     ctx.stroke();
   }
@@ -476,19 +532,38 @@ function drawFurniture(ctx: Ctx, f: FurnitureObject, c: number) {
   const horizontal = w >= h;
   switch (f.type) {
     case 'table': {
-      box(0.14);
       ctx.lineWidth = Math.max(0.5, c * 0.025);
-      ctx.beginPath();
-      for (let k = 1; k < 3; k++) {
-        if (horizontal) {
-          ctx.moveTo(px + 0.14 * c, py + 0.14 * c + ((ph - 0.28 * c) * k) / 3);
-          ctx.lineTo(px + pw - 0.14 * c, py + 0.14 * c + ((ph - 0.28 * c) * k) / 3);
-        } else {
-          ctx.moveTo(px + 0.14 * c + ((pw - 0.28 * c) * k) / 3, py + 0.14 * c);
-          ctx.lineTo(px + 0.14 * c + ((pw - 0.28 * c) * k) / 3, py + ph - 0.14 * c);
+      if (Math.max(w, h) <= Math.min(w, h) * 1.35) {
+        const cx = px + pw / 2;
+        const cy = py + ph / 2;
+        const rx = pw * 0.4;
+        const ry = ph * 0.4;
+        ctx.beginPath();
+        ctx.ellipse(cx, cy, rx, ry, 0, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+        ctx.lineWidth = Math.max(0.4, c * 0.018);
+        ctx.beginPath();
+        ctx.ellipse(cx, cy, rx * 0.78, ry * 0.78, 0, 0, Math.PI * 2);
+        ctx.moveTo(cx - rx * 0.58, cy);
+        ctx.lineTo(cx + rx * 0.58, cy);
+        ctx.moveTo(cx, cy - ry * 0.58);
+        ctx.lineTo(cx, cy + ry * 0.58);
+        ctx.stroke();
+      } else {
+        box(0.14);
+        ctx.beginPath();
+        for (let k = 1; k < 3; k++) {
+          if (horizontal) {
+            ctx.moveTo(px + 0.14 * c, py + 0.14 * c + ((ph - 0.28 * c) * k) / 3);
+            ctx.lineTo(px + pw - 0.14 * c, py + 0.14 * c + ((ph - 0.28 * c) * k) / 3);
+          } else {
+            ctx.moveTo(px + 0.14 * c + ((pw - 0.28 * c) * k) / 3, py + 0.14 * c);
+            ctx.lineTo(px + 0.14 * c + ((pw - 0.28 * c) * k) / 3, py + ph - 0.14 * c);
+          }
         }
+        ctx.stroke();
       }
-      ctx.stroke();
       break;
     }
     case 'bed': {
@@ -572,6 +647,85 @@ function drawFurniture(ctx: Ctx, f: FurnitureObject, c: number) {
         else ctx.fillRect(px, py + k * c * 0.25, pw, c * 0.25);
       }
       ctx.restore();
+      break;
+    }
+    case 'chair': {
+      const cx = px + pw / 2;
+      const cy = py + ph / 2;
+      const radius = Math.min(pw, ph) * 0.28;
+      const angle = f.facing === 'west' ? Math.PI / 2 : f.facing === 'north' ? Math.PI : f.facing === 'east' ? -Math.PI / 2 : 0;
+      ctx.translate(cx, cy);
+      ctx.rotate(angle);
+      ctx.beginPath();
+      ctx.arc(0, c * 0.05, radius, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.moveTo(-radius * 0.82, -radius * 0.55);
+      ctx.lineTo(-radius * 0.82, -radius * 1.5);
+      ctx.quadraticCurveTo(0, -radius * 1.85, radius * 0.82, -radius * 1.5);
+      ctx.lineTo(radius * 0.82, -radius * 0.55);
+      ctx.stroke();
+      break;
+    }
+    case 'bench': {
+      box(0.12);
+      ctx.lineWidth = Math.max(0.5, c * 0.025);
+      ctx.beginPath();
+      if (horizontal) {
+        ctx.moveTo(px, py + ph * 0.35);
+        ctx.lineTo(px + pw, py + ph * 0.35);
+        ctx.moveTo(px, py + ph * 0.68);
+        ctx.lineTo(px + pw, py + ph * 0.68);
+      } else {
+        ctx.moveTo(px + pw * 0.35, py);
+        ctx.lineTo(px + pw * 0.35, py + ph);
+        ctx.moveTo(px + pw * 0.68, py);
+        ctx.lineTo(px + pw * 0.68, py + ph);
+      }
+      ctx.stroke();
+      break;
+    }
+    case 'cabinet': {
+      box(0.1);
+      ctx.lineWidth = Math.max(0.5, c * 0.025);
+      ctx.beginPath();
+      if (horizontal) {
+        ctx.moveTo(px + pw / 2, py + c * 0.12);
+        ctx.lineTo(px + pw / 2, py + ph - c * 0.12);
+        ctx.arc(px + pw * 0.42, py + ph / 2, c * 0.035, 0, Math.PI * 2);
+        ctx.arc(px + pw * 0.58, py + ph / 2, c * 0.035, 0, Math.PI * 2);
+      } else {
+        ctx.moveTo(px + c * 0.12, py + ph / 2);
+        ctx.lineTo(px + pw - c * 0.12, py + ph / 2);
+        ctx.arc(px + pw / 2, py + ph * 0.42, c * 0.035, 0, Math.PI * 2);
+        ctx.arc(px + pw / 2, py + ph * 0.58, c * 0.035, 0, Math.PI * 2);
+      }
+      ctx.stroke();
+      break;
+    }
+    case 'rug': {
+      ctx.fillStyle = 'rgba(42, 36, 31, 0.04)';
+      ctx.strokeStyle = INK.ink;
+      ctx.lineWidth = Math.max(0.6, c * 0.035);
+      const inset = c * 0.12;
+      ctx.beginPath();
+      ctx.roundRect(px + inset, py + inset, pw - inset * 2, ph - inset * 2, Math.min(c * 0.22, Math.min(pw, ph) * 0.12));
+      ctx.fill();
+      ctx.stroke();
+      ctx.lineWidth = Math.max(0.4, c * 0.018);
+      ctx.beginPath();
+      ctx.roundRect(px + inset * 2.2, py + inset * 2.2, pw - inset * 4.4, ph - inset * 4.4, Math.min(c * 0.14, Math.min(pw, ph) * 0.08));
+      ctx.stroke();
+      const cx = px + pw / 2;
+      const cy = py + ph / 2;
+      ctx.beginPath();
+      ctx.moveTo(cx, cy - c * 0.16);
+      ctx.lineTo(cx + c * 0.16, cy);
+      ctx.lineTo(cx, cy + c * 0.16);
+      ctx.lineTo(cx - c * 0.16, cy);
+      ctx.closePath();
+      ctx.stroke();
       break;
     }
     case 'well': {

@@ -7,12 +7,12 @@
  * furniture is rolled back if it would cut a room off from its doors.
  */
 import { createEmptyMap, idx, ORTHOGONAL, rectCenter, rectContains, setDifficult } from '../model/grid';
-import type { DoorObject, DungeonMap, FurnitureObject, FurnitureType, Point, Rect, RoomObject, StairsObject } from '../model/types';
+import type { DoorObject, DungeonMap, FurnitureFacing, FurnitureObject, FurnitureType, Point, Rect, RoomObject, StairsObject } from '../model/types';
 import { createRng, type Rng } from '../rng';
 import type { GenerateResult } from './generate';
 import { validateDungeon } from './validate';
 
-export const INTERIOR_VERSION = 2;
+export const INTERIOR_VERSION = 3;
 export type InteriorKind = 'tavern' | 'inn' | 'manor' | 'shop' | 'smithy' | 'temple' | 'barracks' | 'den' | 'warehouse' | 'stables' | 'cottage';
 
 interface Split {
@@ -20,6 +20,7 @@ interface Split {
   line: number; // x (vertical) or y (horizontal) of the wall
   from: number;
   to: number; // inclusive span along the wall
+  door?: boolean;
 }
 
 const MIN_ROOM = 4;
@@ -57,8 +58,8 @@ interface Plan {
 }
 
 const PLANS: Record<InteriorKind, Plan> = {
-  tavern: { title: 'Tavern', w: 28, h: 22, front: 0.55, maxRooms: 6, main: 'Common room', others: ['Kitchen', 'Storeroom', 'Guest room', 'Guest room', 'Private room', 'Guest room', 'Guest room', 'Pantry'] },
-  inn: { title: 'Inn', w: 32, h: 26, front: 0.42, maxRooms: 9, main: 'Common room', others: ['Kitchen', 'Storeroom', 'Guest room', 'Guest room', 'Guest room', 'Guest room', 'Private room', 'Guest room', 'Pantry'] },
+  tavern: { title: 'Tavern', w: 28, h: 26, front: 0.42, maxRooms: 6, main: 'Common room', others: ['Kitchen', 'Storeroom', 'Guest room', 'Guest room', 'Private room', 'Guest room', 'Guest room', 'Pantry'] },
+  inn: { title: 'Inn', w: 32, h: 32, front: 0.42, maxRooms: 9, main: 'Common room', others: ['Kitchen', 'Storeroom', 'Guest room', 'Guest room', 'Guest room', 'Guest room', 'Private room', 'Guest room', 'Pantry'] },
   manor: {
     title: 'Manor',
     w: 38,
@@ -87,6 +88,17 @@ const SOLID: Record<FurnitureType, boolean> = {
   hearth: true,
   stall: true,
   well: true,
+  chair: false,
+  bench: false,
+  cabinet: true,
+  rug: false,
+};
+
+const DIFFICULT: Partial<Record<FurnitureType, boolean>> = {
+  table: true,
+  bed: true,
+  chair: true,
+  bench: true,
 };
 
 class Furnisher {
@@ -134,13 +146,22 @@ class Furnisher {
     return true;
   }
 
-  /** Place one piece if it fits on free floor, isn't on the room's center, and keeps the room connected. */
-  place(room: Rect, type: FurnitureType, r: Rect): boolean {
+  /** Place one piece if it fits on free floor and keeps the room connected. */
+  place(room: Rect, type: FurnitureType, r: Rect, facing?: FurnitureFacing): boolean {
     const m = this.map;
+    const doors = this.map.objects.filter((o): o is DoorObject => o.kind === 'door');
     const c = rectCenter(room);
     for (let y = r.y; y < r.y + r.h; y++)
       for (let x = r.x; x < r.x + r.w; x++) {
-        if (!rectContains(room, { x, y }) || (x === c.x && y === c.y)) return false;
+        // Solid pieces never take the room's center: validation and room labels use it.
+        if (!rectContains(room, { x, y }) || (SOLID[type] && x === c.x && y === c.y)) return false;
+        // Keep an approach square and a turning square clear inside every doorway.
+        if (doors.some((door) => {
+          const dx = x - door.at.x;
+          const dy = y - door.at.y;
+          const distance = Math.abs(dx) + Math.abs(dy);
+          return distance === 1 || (distance === 2 && (dx === 0 || dy === 0));
+        })) return false;
         const i = idx(m, x, y);
         if (m.terrain[i] !== 'floor' || m.flags[i] & 1) return false;
       }
@@ -150,7 +171,7 @@ class Furnisher {
         const i = idx(m, x, y);
         before.push([i, m.terrain[i], m.flags[i]]);
         if (SOLID[type]) m.terrain[i] = 'furniture';
-        else setDifficult(m, x, y, true);
+        else if (DIFFICULT[type]) setDifficult(m, x, y, true);
       }
     if (!this.roomOk(room)) {
       for (const [i, t, f] of before) {
@@ -159,7 +180,7 @@ class Furnisher {
       }
       return false;
     }
-    this.objects.push({ id: `furn-${++this.n}`, kind: 'furniture', type, rect: r, visibility: 'public' });
+    this.objects.push({ id: `furn-${++this.n}`, kind: 'furniture', type, rect: r, facing, visibility: 'public' });
     return true;
   }
 
@@ -183,28 +204,49 @@ class Furnisher {
     const { rng } = this;
     const { x, y, w, h } = room;
     const tables = (spacingX: number, spacingY: number) => {
-      for (let ty = y + 2; ty + 1 < y + h - 1; ty += spacingY)
-        for (let tx = x + 1 + rng.int(0, 1); tx + 2 < x + w; tx += spacingX) this.place(room, 'table', { x: tx, y: ty, w: 2, h: 1 });
+      const anchors: Point[] = [];
+      for (let ty = y + 2; ty + 2 < y + h - 1; ty += spacingY)
+        for (let tx = x + 2; tx + 2 < x + w - 1; tx += spacingX) anchors.push({ x: tx, y: ty });
+      for (const p of rng.shuffle(anchors)) {
+        if (!this.place(room, 'table', { x: p.x, y: p.y, w: 2, h: 2 })) continue;
+        // Seating is placed as a group around the table, leaving natural aisles between groups.
+        for (const seat of [
+          { x: p.x, y: p.y - 1, facing: 'south' as const },
+          { x: p.x + 1, y: p.y - 1, facing: 'south' as const },
+          { x: p.x, y: p.y + 2, facing: 'north' as const },
+          { x: p.x + 1, y: p.y + 2, facing: 'north' as const },
+          { x: p.x - 1, y: p.y, facing: 'east' as const },
+          { x: p.x - 1, y: p.y + 1, facing: 'east' as const },
+          { x: p.x + 2, y: p.y, facing: 'west' as const },
+          { x: p.x + 2, y: p.y + 1, facing: 'west' as const },
+        ]) this.place(room, 'chair', { x: seat.x, y: seat.y, w: 1, h: 1 }, seat.facing);
+      }
     };
     switch (role) {
       case 'Common room':
       case 'Great hall': {
-        if (role === 'Common room') this.place(room, 'counter', { x: x + 1, y: y + 1, w: Math.min(5, w - 3), h: 1 });
-        if (!this.place(room, 'hearth', { x: x + w - 1, y: y + Math.floor(h / 2) - 1, w: 1, h: 2 })) this.place(room, 'hearth', { x, y: y + Math.floor(h / 2) - 1, w: 1, h: 2 });
-        tables(4, 3);
+        if (w >= 8 && h >= 6) this.place(room, 'rug', { x: x + Math.floor(w / 2) - 3, y: y + Math.floor(h / 2) - 2, w: 6, h: 4 });
+        if (role === 'Common room') {
+          // Put the serving bar against a side wall so the entrance and central aisle stay open.
+          this.place(room, 'counter', { x: x + 1, y: y + 2, w: 1, h: Math.min(5, h - 4) });
+          this.alongWall(room, 'shelf', Math.max(1, Math.floor(h / 4)));
+        }
+        if (!this.place(room, 'hearth', { x: x + w - 2, y: y + 1, w: 2, h: 2 })) this.place(room, 'hearth', { x: x + 1, y: y + 1, w: 2, h: 2 });
+        tables(5, 5);
         if (role === 'Great hall') this.alongWall(room, 'shelf', 2);
         break;
       }
       case 'Kitchen':
-        this.place(room, 'hearth', { x, y, w: 2, h: 1 });
-        this.place(room, 'counter', { x: x + 1, y: y + h - 1, w: Math.max(1, w - 2), h: 1 });
-        this.place(room, 'table', { x: x + 1, y: y + 2, w: 2, h: 1 });
+        this.place(room, 'hearth', { x: x + 1, y: y + 1, w: 2, h: 2 });
+        this.place(room, 'counter', { x: x + 1, y: y + h - 2, w: Math.max(2, w - 2), h: 1 });
+        this.place(room, 'table', { x: x + Math.max(1, Math.floor(w / 2) - 1), y: y + Math.max(2, Math.floor(h / 2)), w: 2, h: 1 });
+        this.alongWall(room, 'cabinet', 2);
         this.alongWall(room, 'barrel', 2);
         break;
       case 'Storeroom':
       case 'Pantry': {
-        this.alongWall(room, 'barrel', Math.max(2, Math.floor((w + h) / 3)));
-        this.alongWall(room, 'shelf', 2);
+        this.alongWall(room, 'barrel', Math.max(2, Math.floor((w + h) / 4)));
+        this.alongWall(room, 'shelf', Math.max(1, Math.floor(w / 3)));
         if (role === 'Storeroom') {
           // Stairs down to the cellar: the way deeper in.
           for (let k = 0; k < 20; k++) {
@@ -223,17 +265,25 @@ class Furnisher {
       case 'Master bedroom':
       case 'Servants’ quarters': {
         const beds = role === 'Servants’ quarters' ? 3 : role === 'Master bedroom' ? 1 : rng.int(1, 2);
-        for (let b = 0; b < beds; b++) if (!this.place(room, 'bed', { x: x + b * 2, y, w: 1, h: 2 })) this.place(room, 'bed', { x: x + w - 1 - b * 2, y: y + h - 2, w: 1, h: 2 });
-        this.alongWall(room, rng.chance(0.5) ? 'shelf' : 'barrel', 1);
+        if (w >= 6 && h >= 6) this.place(room, 'rug', { x: x + Math.floor(w / 2) - 2, y: y + Math.floor(h / 2) - 1, w: 4, h: 2 });
+        for (let b = 0; b < beds; b++) {
+          const bx = x + 1 + b * 2;
+          if (!this.place(room, 'bed', { x: bx, y: y + 1, w: 1, h: 2 })) this.place(room, 'bed', { x: x + w - 2 - b * 2, y: y + h - 3, w: 1, h: 2 });
+          this.place(room, 'cabinet', { x: bx + 1, y: y + 1, w: 1, h: 1 });
+        }
+        this.place(room, 'chair', { x: x + w - 2, y: y + 1, w: 1, h: 1 });
+        this.alongWall(room, 'shelf', 1);
         break;
       }
       case 'Shop floor':
-        this.place(room, 'counter', { x: x + 1, y: y + h - 2, w: Math.max(2, w - 3), h: 1 });
-        this.alongWall(room, 'shelf', Math.max(3, Math.floor((w + h) / 2)));
+        this.place(room, 'rug', { x: x + 2, y: y + 2, w: Math.max(2, w - 4), h: 2 });
+        this.place(room, 'counter', { x: x + Math.max(1, Math.floor(w / 2) - 3), y: y + h - 2, w: Math.min(6, w - 2), h: 1 });
+        this.alongWall(room, 'shelf', Math.max(2, Math.floor((w + h) / 3)));
         break;
       case 'Forge':
-        if (!this.place(room, 'hearth', { x: x + w - 2, y: y + h - 2, w: 2, h: 2 })) this.place(room, 'hearth', { x, y: y + h - 2, w: 2, h: 2 });
-        this.place(room, 'counter', { x: x + Math.floor(w / 2), y: y + Math.floor(h / 2) + 1, w: 1, h: 1 }); // anvil
+        if (!this.place(room, 'hearth', { x: x + w - 3, y: y + 1, w: 2, h: 2 })) this.place(room, 'hearth', { x: x + 1, y: y + 1, w: 2, h: 2 });
+        this.place(room, 'counter', { x: x + Math.floor(w / 2) - 1, y: y + Math.floor(h / 2), w: 2, h: 1 }); // anvil
+        this.place(room, 'cabinet', { x: x + 1, y: y + h - 2, w: 2, h: 1 });
         this.alongWall(room, 'barrel', 2);
         this.alongWall(room, 'shelf', 2);
         break;
@@ -245,8 +295,9 @@ class Furnisher {
       case 'Nave':
         this.place(room, 'counter', { x: x + Math.floor(w / 2) - 1, y: y + h - 1, w: 3, h: 1 }); // altar at the far end
         for (let ty = y + 2; ty < y + h - 3; ty += 2) {
-          this.place(room, 'table', { x: x + 1, y: ty, w: Math.max(1, Math.floor(w / 2) - 2), h: 1 });
-          this.place(room, 'table', { x: x + Math.floor(w / 2) + 2, y: ty, w: Math.max(1, Math.ceil(w / 2) - 3), h: 1 });
+          // Pews either side of a center aisle
+          this.place(room, 'bench', { x: x + 1, y: ty, w: Math.max(1, Math.floor(w / 2) - 2), h: 1 });
+          this.place(room, 'bench', { x: x + Math.floor(w / 2) + 2, y: ty, w: Math.max(1, Math.ceil(w / 2) - 3), h: 1 });
         }
         break;
       case 'Vestry':
@@ -264,6 +315,7 @@ class Furnisher {
         break;
       case 'Bunk room':
         for (let b = 0; b * 2 < w; b++) this.place(room, 'bed', { x: x + b * 2, y, w: 1, h: 2 });
+        this.place(room, 'bench', { x: x + 1, y: y + h - 1, w: Math.min(3, w - 2), h: 1 });
         break;
       case 'Armory':
         this.alongWall(room, 'shelf', w + h);
@@ -273,7 +325,10 @@ class Furnisher {
       case 'Main room':
         if (role !== 'Guard room') this.place(room, 'hearth', { x: x + w - 1, y: y + Math.floor(h / 2) - 1, w: 1, h: 2 });
         tables(4, 3);
-        if (role === 'Guard room') this.alongWall(room, 'shelf', 2);
+        if (role === 'Guard room') {
+          this.alongWall(room, 'shelf', 2);
+          this.place(room, 'bench', { x: x + 1, y: y + h - 2, w: Math.min(4, w - 2), h: 1 });
+        }
         break;
       case 'Hideout':
         tables(4, 3);
@@ -294,7 +349,7 @@ class Furnisher {
         break;
       case 'Chapel':
         this.place(room, 'counter', { x: x + Math.floor(w / 2) - 1, y, w: 2, h: 1 }); // altar
-        tables(3, 2); // pews
+        for (let ty = y + 2; ty < y + h - 1; ty += 2) this.place(room, 'bench', { x: x + 1, y: ty, w: Math.max(1, w - 2), h: 1 }); // pews
         break;
       default:
         tables(4, 3);
@@ -304,8 +359,7 @@ class Furnisher {
 }
 
 export function generateInterior(seed: string, kind: InteriorKind): GenerateResult {
-  // Version 1 interiors (tavern, manor) keep their old random stream, so saved seeds still match.
-  const rng = createRng(kind === 'tavern' || kind === 'manor' ? `interior:1:${kind}:${seed}` : `interior:${INTERIOR_VERSION}:${kind}:${seed}`);
+  const rng = createRng(`interior:${INTERIOR_VERSION}:${kind}:${seed}`);
   const plan = PLANS[kind];
   const W = plan.w;
   const H = plan.h;
@@ -328,10 +382,62 @@ export function generateInterior(seed: string, kind: InteriorKind): GenerateResu
   const splits: Split[] = [];
   const mainH = Math.max(MIN_ROOM + 1, Math.round(inner.h * plan.front));
   const main: Rect = { x: inner.x, y: inner.y, w: inner.w, h: mainH };
-  splits.push({ vertical: false, line: inner.y + mainH, from: inner.x, to: inner.x + inner.w - 1 });
+  const frontSplit: Split = { vertical: false, line: inner.y + mainH, from: inner.x, to: inner.x + inner.w - 1 };
+  splits.push(frontSplit);
   const back: Rect = { x: inner.x, y: inner.y + mainH + 1, w: inner.w, h: inner.h - mainH - 1 };
   const maxRooms = plan.maxRooms;
-  if (back.h >= 2) bsp(rng, back, 0, (r, d) => r.w * r.h <= (kind === 'cottage' ? 60 : 30) || (d >= 2 && rng.chance(0.35)) || leaves.length >= maxRooms - 1, leaves, splits);
+  const guidedInn = (kind === 'tavern' || kind === 'inn') && back.h >= 7 && inner.w >= 18;
+  const mainToHallX = inner.x + Math.floor(inner.w / 2);
+  /**
+   * A row of rooms across [x0, x1), each at least MIN_ROOM wide, divided by
+   * walls with no doors; each room gets one door in `doorLine` (a hall wall).
+   */
+  const roomRow = (x0: number, x1: number, y: number, h: number, doorLine: number, limit: number) => {
+    const total = x1 - x0;
+    const n = Math.max(1, Math.min(limit, Math.floor((total + 1) / (MIN_ROOM + 1))));
+    if (limit <= 0 || total < MIN_ROOM) return;
+    const floorW = total - (n - 1);
+    const base = Math.floor(floorW / n);
+    const extra = floorW - base * n;
+    let x = x0;
+    for (let i = 0; i < n; i++) {
+      const w = base + (i < extra ? 1 : 0);
+      leaves.push({ x, y, w, h });
+      splits.push({ vertical: false, line: doorLine, from: x, to: x + w - 1 });
+      // Dividers run into the hall wall too, so it has no gaps where they meet.
+      if (i < n - 1) splits.push({ vertical: true, line: x + w, from: Math.min(y, doorLine), to: Math.max(y + h - 1, doorLine), door: false });
+      x += w + 1;
+    }
+  };
+  const roomBudget = () => Math.min(maxRooms - 1, plan.others.length) - leaves.length;
+  if (guidedInn) {
+    // The common room opens onto a rear hall, and every other room has its
+    // own door off the hall. Inns with room for it get rooms on both sides.
+    const doubleLoaded = back.h >= 2 * MIN_ROOM + 4;
+    if (doubleLoaded) {
+      // [rooms A] wall [hall ×2] wall [rooms B]; a passage from the common room
+      // runs between the A rooms to the hall.
+      const hA = Math.floor((back.h - 4) / 2);
+      const wallA = back.y + hA;
+      const hallY = wallA + 1;
+      const wallB = hallY + 2;
+      const yB = wallB + 1;
+      const hB = back.y + back.h - yB;
+      const px = mainToHallX;
+      splits.push({ vertical: true, line: px - 1, from: back.y, to: wallA, door: false });
+      splits.push({ vertical: true, line: px + 1, from: back.y, to: wallA, door: false });
+      roomRow(inner.x, inner.x + inner.w, yB, hB, wallB, roomBudget());
+      const half = roomBudget();
+      roomRow(inner.x, px - 1, back.y, hA, wallA, Math.ceil(half / 2));
+      roomRow(px + 2, inner.x + inner.w, back.y, hA, wallA, roomBudget());
+    } else {
+      const hallY = back.y;
+      const wall = hallY + 2;
+      roomRow(inner.x, inner.x + inner.w, wall + 1, inner.y + inner.h - wall - 1, wall, roomBudget());
+    }
+  } else if (back.h >= 2) {
+    bsp(rng, back, 0, (r, d) => r.w * r.h <= (kind === 'cottage' ? 60 : 30) || (d >= 2 && rng.chance(0.35)) || leaves.length >= maxRooms - 1, leaves, splits);
+  }
   // The manor's great hall can lose a wing to a side room.
   if (kind === 'manor' && main.w >= 22) {
     const cut = main.w - rng.int(6, 8);
@@ -346,6 +452,7 @@ export function generateInterior(seed: string, kind: InteriorKind): GenerateResu
   const doors: DoorObject[] = [];
   let dn = 0;
   for (const s of splits) {
+    if (s.door === false) continue;
     const options: Point[] = [];
     for (let k = s.from; k <= s.to; k++) {
       const p = s.vertical ? { x: s.line, y: k } : { x: k, y: s.line };
@@ -354,7 +461,8 @@ export function generateInterior(seed: string, kind: InteriorKind): GenerateResu
       if (a === 'floor' && b === 'floor') options.push(p);
     }
     if (!options.length) continue;
-    const p = rng.pick(options);
+    const preferred = s === frontSplit ? options.find((p) => p.x === mainToHallX) : undefined;
+    const p = preferred ?? rng.pick(options);
     map.terrain[idx(map, p.x, p.y)] = 'door';
     doors.push({ id: `door-${++dn}`, kind: 'door', at: p, state: rng.chance(0.4) ? 'open' : 'closed', visibility: 'public' });
   }
@@ -384,8 +492,10 @@ export function generateInterior(seed: string, kind: InteriorKind): GenerateResu
   // The storeroom (with the cellar stairs) should be the room farthest from the front door.
   const far = rooms.slice(1).reduce((best, r) => (rectCenter(r.rect).y > rectCenter(best.rect).y ? r : best), rooms[1] ?? rooms[0]);
   const storeIdx = rooms.findIndex((r) => r.role === 'Storeroom');
-  if (far && storeIdx > 0 && far !== rooms[storeIdx]) [far.role, rooms[storeIdx].role] = [rooms[storeIdx].role, far.role];
+  if (!guidedInn && far && storeIdx > 0 && far !== rooms[storeIdx]) [far.role, rooms[storeIdx].role] = [rooms[storeIdx].role, far.role];
 
+  // Furniture placement checks these so every room entrance keeps a clear approach.
+  map.objects = [...doors];
   const furnisher = new Furnisher(map, rng);
   const stairs: StairsObject[] = [];
   for (const r of rooms) {

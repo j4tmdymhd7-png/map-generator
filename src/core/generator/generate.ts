@@ -14,7 +14,7 @@ import type { CorridorObject, DoorObject, DungeonMap, Point, Rect, RoomObject, R
 import { createRng, type Rng } from '../rng';
 import { validateDungeon, type ValidationIssue } from './validate';
 
-export const GENERATOR_VERSION = 2;
+export const GENERATOR_VERSION = 3;
 
 export type Theme = 'dungeon' | 'cave';
 
@@ -47,7 +47,7 @@ export const DEFAULT_PARAMS: GeneratorParams = {
   theme: 'dungeon',
   rooms: { min: 8, max: 12 },
   roomSize: { min: 3, max: 9 },
-  loopChance: 0.15,
+  loopChance: 0.32,
   deadEnds: 2,
   furnishing: 0.6,
   doorChance: 0.8,
@@ -93,14 +93,14 @@ function pickShape(rng: Rng, r: Rect, theme: Theme): RoomShape {
   const weights: [RoomShape, number][] =
     theme === 'cave'
       ? [
-          ['cave', 0.85],
-          ['round', small ? 0 : 0.15],
+          ['cave', 0.72],
+          ['round', small ? 0 : 0.28],
         ]
       : [
-          ['rect', 0.5],
-          ['round', small ? 0 : 0.18],
-          ['cross', small ? 0 : 0.17],
-          ['cave', small ? 0 : 0.15],
+          ['rect', 0.34],
+          ['round', small ? 0 : 0.25],
+          ['cross', small ? 0 : 0.2],
+          ['cave', small ? 0 : 0.21],
         ];
   const total = weights.reduce((s, [, w]) => s + w, 0);
   let roll = rng.next() * total;
@@ -567,8 +567,33 @@ export function generateDungeon(seed: string, overrides: Partial<GeneratorParams
       b = rectCenter(rects[e.b]);
     const path = routeCorridor(map, roomAt, corridor, noise, idx(map, a.x, a.y), idx(map, b.x, b.y), e.a, e.b, p.theme);
     const cells: Point[] = [];
+    const carved = new Set<number>();
     for (const i of path) {
       if (roomAt[i] >= 0 || corridor[i]) continue;
+      carved.add(i);
+      // Natural passages breathe wider than a one-cell line. Occasional
+      // shoulders make traversable pockets while keeping the movement grid.
+      if (p.theme === 'cave') {
+        const x = i % map.width,
+          y = (i - x) / map.width;
+        // Sides first, then corners: a corner square is only carved when one of
+        // the two squares beside it is open, so it never touches the passage by
+        // a corner alone (you can't step diagonally past a corner).
+        const open = (ax: number, ay: number) => carved.has(idx(map, ax, ay)) || map.terrain[idx(map, ax, ay)] !== 'void';
+        for (const d of [...ORTHOGONAL, ...EIGHT_WAY.filter((e) => e.x && e.y)]) {
+          const nx = x + d.x,
+            ny = y + d.y;
+          if (nx < 1 || ny < 1 || nx >= map.width - 1 || ny >= map.height - 1) continue;
+          const ni = idx(map, nx, ny);
+          if (roomAt[ni] >= 0 || map.terrain[ni] !== 'void') continue;
+          const diagonal = d.x !== 0 && d.y !== 0;
+          if (!rng.chance(diagonal ? 0.32 : 0.18)) continue;
+          if (diagonal && !open(nx, y) && !open(x, ny)) continue;
+          carved.add(ni);
+        }
+      }
+    }
+    for (const i of carved) {
       corridor[i] = 1;
       map.terrain[i] = 'floor';
       const x = i % map.width;

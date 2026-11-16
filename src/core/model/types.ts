@@ -118,14 +118,16 @@ export interface LootObject extends BaseObject {
   items: ItemStack[];
 }
 
-export const FURNITURE_TYPES = ['table', 'bed', 'counter', 'shelf', 'barrel', 'hearth', 'stall', 'well'] as const;
+export const FURNITURE_TYPES = ['table', 'bed', 'counter', 'shelf', 'barrel', 'hearth', 'stall', 'well', 'chair', 'bench', 'cabinet', 'rug'] as const;
 export type FurnitureType = (typeof FURNITURE_TYPES)[number];
+export type FurnitureFacing = 'north' | 'east' | 'south' | 'west';
 
 /** Drawn furniture. Its squares are 'furniture' terrain (solid) or difficult floor (tables, beds). */
 export interface FurnitureObject extends BaseObject {
   kind: 'furniture';
   rect: Rect;
   type: FurnitureType;
+  facing?: FurnitureFacing;
 }
 
 /** A drawn structure over 'wall' squares: a house, a stretch of city wall, or a tower. */
