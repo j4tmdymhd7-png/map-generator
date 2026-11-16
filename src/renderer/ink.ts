@@ -307,7 +307,7 @@ function isUrban(map: DungeonMap): boolean {
 }
 
 function drawPaper(ctx: Ctx, map: DungeonMap, p: Pre, c: number, r: Region, color: boolean) {
-  ctx.fillStyle = color ? (isUrban(map) ? '#aaa28f' : '#718052') : INK.paper;
+  ctx.fillStyle = color ? (isUrban(map) ? OUTDOOR_COLORS.townPaper : OUTDOOR_COLORS.wildPaper) : INK.paper;
   ctx.fillRect(r.x0 * c, r.y0 * c, (r.x1 - r.x0) * c, (r.y1 - r.y0) * c);
   if (color) return;
   forCells(map, r, 0, (x, y) => {
@@ -372,7 +372,7 @@ function drawFloor(ctx: Ctx, map: DungeonMap, p: Pre, c: number, r: Region, grid
       }
     }
   }
-  ctx.fillStyle = color ? (isUrban(map) ? '#c0b59a' : '#85935e') : INK.floor;
+  ctx.fillStyle = color ? (isUrban(map) ? OUTDOOR_COLORS.townGround : OUTDOOR_COLORS.ground) : INK.floor;
   ctx.fill(open);
   ctx.save();
   ctx.clip(open);
@@ -421,9 +421,9 @@ function drawNaturalSurfaces(ctx: Ctx, map: DungeonMap, p: Pre, c: number, r: Re
     const water = naturalPath(map, p, 'water', (t) => t === 'water', r);
     const deepwater = naturalPath(map, p, 'deepwater', (t) => t === 'deepwater', r);
     const road = naturalPath(map, p, 'road', (t) => t === 'road', r);
-    ctx.fillStyle = '#275c64'; fillMapPath(ctx, deepwater, c);
-    ctx.fillStyle = '#3b7477'; fillMapPath(ctx, water, c);
-    ctx.fillStyle = isUrban(map) ? STREET : '#796c4d'; fillMapPath(ctx, road, c);
+    ctx.fillStyle = OUTDOOR_COLORS.deepWater; fillMapPath(ctx, deepwater, c);
+    ctx.fillStyle = OUTDOOR_COLORS.shallowWater; fillMapPath(ctx, water, c);
+    ctx.fillStyle = isUrban(map) ? STREET : OUTDOOR_COLORS.trail; fillMapPath(ctx, road, c);
     ctx.lineWidth = 0.035;
     ctx.strokeStyle = 'rgba(35, 48, 39, 0.42)';
     strokeMapPath(ctx, road, c);
@@ -1057,9 +1057,23 @@ function drawLoot(ctx: Ctx, loot: LootObject, c: number) {
 
 const ROOF = '#e4d8bb';
 const STONE = '#cbbd9c';
-/** Color look, towns: tiled roofs and streets far enough apart in brightness to read in grayscale too. */
-const ROOF_TILE = '#6f4630';
-const STREET = '#8c8270';
+/**
+ * The Color look's palette. Neighboring terrains stay at least 1.4:1 apart in
+ * brightness (see palette.test.ts), so they separate in grayscale too.
+ */
+export const OUTDOOR_COLORS = {
+  wildPaper: '#718052',
+  ground: '#85935e',
+  townPaper: '#aaa28f',
+  townGround: '#c0b59a',
+  shallowWater: '#3b7477',
+  deepWater: '#275c64',
+  trail: '#796c4d',
+  street: '#8c8270',
+  roof: '#6f4630',
+} as const;
+const ROOF_TILE = OUTDOOR_COLORS.roof;
+const STREET = OUTDOOR_COLORS.street;
 
 /** A hip roof seen from above: ridge along the long side, hips to the corners, shading on two slopes. */
 function drawRoof(ctx: Ctx, rect: { x: number; y: number; w: number; h: number }, c: number, outdoor = false) {
