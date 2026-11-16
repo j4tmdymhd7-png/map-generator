@@ -17,6 +17,7 @@ import { SCHEMA_VERSION, type Campaign, type DoorState, type DungeonMap, type Gr
 import { generateNpc } from './core/world/npcs';
 import { POI_INFO } from './core/world/poi';
 import { drawPois, poiAt } from './renderer/poiLayer';
+import type { MapPalette } from './renderer/ink';
 import { NpcCard } from './world/NpcCard';
 import { PeopleDialog } from './world/PeopleDialog';
 import { PoiPanel } from './world/PoiPanel';
@@ -146,6 +147,22 @@ function Workspace({
   const [kind, setKind] = useState<MapKind>(() => (SIZE_INFO[size].kinds.some((k) => k.kind === map.recipe?.kind) ? (map.recipe!.kind as MapKind) : SIZE_INFO[size].kinds[0].kind));
 
   const [showGrid, setShowGrid] = useState(true);
+  // Map look: a per-browser preference (the player screen follows this window).
+  const [palette, setPaletteState] = useState<MapPalette>(() => {
+    try {
+      return localStorage.getItem('dmg.palette.v1') === 'color' ? 'color' : 'ink';
+    } catch {
+      return 'ink';
+    }
+  });
+  const setPalette = (p: MapPalette) => {
+    setPaletteState(p);
+    try {
+      localStorage.setItem('dmg.palette.v1', p);
+    } catch {
+      // ignore
+    }
+  };
   const [roomNumbers, setRoomNumbers] = useState(true);
   const [hover, setHover] = useState<Point | null>(null);
   const [message, setMessage] = useState<{ text: string; dmOnly?: boolean } | null>(null);
@@ -411,6 +428,7 @@ function Workspace({
     fog: fogOn ? fog : null,
     activeId: enc.activeId,
     campaign: name,
+    palette,
   });
   const playerStateRef = useRef(playerState);
   useEffect(() => {
@@ -437,7 +455,7 @@ function Workspace({
   }, []);
   useEffect(() => {
     if (screenOpen.current) channel.current?.postMessage(playerStateRef.current());
-  }, [map, enc.tokens, fog, fogOn, npcs, enc.activeId]);
+  }, [map, enc.tokens, fog, fogOn, npcs, enc.activeId, palette]);
   const lastAnim = useRef<string>('');
   const sendAnim = () => {
     if (!screenOpen.current) return;
@@ -721,6 +739,15 @@ function Workspace({
             <label className="check">
               <input type="checkbox" checked={roomNumbers} onChange={(e) => setRoomNumbers(e.target.checked)} /> Room numbers
             </label>
+            <fieldset className="map-style" title="Color applies to towns, cities, forests and wilderness. Dungeons, caves and interiors stay in ink.">
+              <legend>Map style</legend>
+              <label className="check">
+                <input type="radio" name="map-style" checked={palette === 'ink'} onChange={() => setPalette('ink')} /> Ink
+              </label>
+              <label className="check">
+                <input type="radio" name="map-style" checked={palette === 'color'} onChange={() => setPalette('color')} /> Color (outdoors)
+              </label>
+            </fieldset>
             <label className="check" title="Hide what the party hasn't seen">
               <input type="checkbox" checked={fogOn} onChange={(e) => setFogOn(e.target.checked)} /> Fog of war
             </label>
@@ -741,6 +768,7 @@ function Workspace({
       </div>
       <div className="workspace">
         <MapView
+          palette={palette}
           map={map}
           showGrid={showGrid}
           roomNumbers={roomNumbers}

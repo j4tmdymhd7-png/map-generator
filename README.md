@@ -85,6 +85,14 @@ A browser-based 2D dungeon authoring and encounter tool for D&D (2024 rules). Ge
 - Dungeons (generator version 3) have more loops and more varied room shapes. Caves have wider, uneven passages. Walls in dungeons, caves and interiors are drawn with rounded corners; town walls and houses stay square.
 - The same seed now makes a different dungeon, cave, tavern or manor than in earlier versions. Saved campaigns are unaffected, because saves keep the whole map.
 
+**Map style: Ink or Color (contributed, with fixes).** View ▾ → Map style.
+
+- **Ink** (the default) is the monochrome parchment-and-ink look everywhere.
+- **Color** gives towns, cities, forests and wilderness colored ground, water and roads traced as smooth outlines, green trees and tiled roofs. Dungeons, caves and interiors always stay in ink.
+- Color is never the only cue: shallow water keeps its ripples and gains a stipple, deep water has more ripples, and roads, brush and trees keep their own marks. Neighboring terrains are at least 1.4:1 apart in brightness (streets and roofs 2.1:1), so they also separate in grayscale.
+- The choice is saved per browser, and the player screen follows the DM window.
+- Color outdoors draws faster than Ink (no paper grain under the fills).
+
 Next: NPC routines and the world clock, editor tools and undo (M2b), and importing monster stats into the private library.
 
 ## Scripts

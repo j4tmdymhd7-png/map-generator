@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { DungeonMap, Point } from '../core/model/types';
+import type { MapPalette } from './ink';
 import { TILE, TileCache, tileCellSize } from './tileCache';
 import { fitViewport, screenToCell, zoomAt, type Viewport } from './viewport';
 
@@ -14,6 +15,8 @@ interface Props {
   map: DungeonMap;
   showGrid: boolean;
   roomNumbers: boolean;
+  /** Ink or Color look (Color applies to outdoor maps only). */
+  palette?: MapPalette;
   onHoverCell?: (cell: Point | null) => void;
   /** Click (not drag) on a square. */
   onCellClick?: (cell: Point, mods: { shift: boolean }) => void;
@@ -35,7 +38,7 @@ const PAN_STEP = 80;
  * bitmap (re-rendered at a sharper resolution after zooming settles) and
  * blitted each frame, so panning stays smooth on large maps.
  */
-export function MapView({ map, showGrid, roomNumbers, onHoverCell, onCellClick, onCellContext, overlay, onKey, controllerRef }: Props) {
+export function MapView({ map, showGrid, roomNumbers, palette = 'ink', onHoverCell, onCellClick, onCellContext, overlay, onKey, controllerRef }: Props) {
   const wrapRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const view = useRef<Viewport>({ zoom: 16, x: 0, y: 0 });
@@ -66,7 +69,7 @@ export function MapView({ map, showGrid, roomNumbers, onHoverCell, onCellClick, 
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.fillStyle = '#18171a';
     ctx.fillRect(0, 0, w, h);
-    if (!tiles.current) tiles.current = new TileCache(map, { grid: showGrid, roomNumbers });
+    if (!tiles.current) tiles.current = new TileCache(map, { grid: showGrid, roomNumbers, palette });
     // Draw the visible tiles; build a few new ones per frame and fill gaps with
     // any cached resolution so panning never shows holes for long.
     const cell = tileCell.current;
@@ -113,7 +116,7 @@ export function MapView({ map, showGrid, roomNumbers, onHoverCell, onCellClick, 
       ctx.strokeRect(v.x + hc.x * v.zoom + 1, v.y + hc.y * v.zoom + 1, v.zoom - 2, v.zoom - 2);
       ctx.setLineDash([]);
     }
-  }, [map, showGrid, roomNumbers]);
+  }, [map, showGrid, roomNumbers, palette]);
 
   useLayoutEffect(() => {
     drawSelf.current = draw;
@@ -205,7 +208,7 @@ export function MapView({ map, showGrid, roomNumbers, onHoverCell, onCellClick, 
       fit();
     }
     requestDraw();
-  }, [map, showGrid, roomNumbers, fit, requestDraw]);
+  }, [map, showGrid, roomNumbers, palette, fit, requestDraw]);
 
   useEffect(() => () => window.clearTimeout(rebuildTimer.current), []);
 

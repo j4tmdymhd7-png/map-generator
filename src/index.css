@@ -1095,3 +1095,16 @@ dialog.small-dialog[open] {
 .dialog-form label {
   align-content: start;
 }
+.map-style {
+  border: none;
+  border-top: 1px solid #333;
+  padding: 0.4rem 0 0;
+  margin: 0;
+  display: grid;
+  gap: 0.35rem;
+}
+.map-style legend {
+  font-size: 0.85rem;
+  color: #a8a8b3;
+  padding: 0;
+}
