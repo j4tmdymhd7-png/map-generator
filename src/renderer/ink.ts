@@ -1,13 +1,14 @@
 /**
- * Pen-and-ink map renderer.
+ * Illustrated 2D map renderer.
  *
  * Draws any rectangle of a map (a tile) onto a 2D canvas, in grid units
  * scaled by `cell` pixels. Every bit of hand-drawn wobble comes from a hash of
  * the map seed and the square (or wall stroke) being drawn, so any tile, at
  * any zoom, draws exactly the same as its neighbours and as the whole map.
  *
- * The look is monochrome on purpose: meaning is carried by line, pattern and
- * symbol, never by hue.
+ * Dungeon interiors retain their parchment-and-ink treatment. Natural maps
+ * use continuous colored terrain contours, with the tactical grid drawn as a
+ * separate overlay above the illustration.
  */
 import { idx, isDifficult, terrainAt } from '../core/model/grid';
 import type { DoorState, DungeonMap, FurnitureObject, LootObject, MapStyle, Point, RoomObject, StructureObject, Terrain } from '../core/model/types';
@@ -70,7 +71,10 @@ interface Pre {
   seed: number;
   style: MapStyle;
   segments: Segment[];
+  corners: Corner[];
+  cornerKeys: Set<string>;
   roadEdges: Segment[];
+  natural: Map<string, Path2D>;
   rockDist: Uint8Array;
   doors: Map<number, DoorState>;
   furnitureCells: Set<number>;
@@ -80,45 +84,110 @@ interface Pre {
   structureCells: Set<number>;
   loot: LootObject[];
   rooms: RoomObject[];
-  /** Wall corners (where a horizontal and a vertical run end together), drawn rounded. Empty outdoors. */
-  corners: Corner[];
-  cornerKeys: Set<string>;
 }
 
-interface Corner {
-  x: number;
-  y: number;
-  ends: [Point, Point];
-}
+export interface Corner { x: number; y: number; ends: [Point, Point] }
 
 const cornerKey = (x: number, y: number) => `${x},${y}`;
 
-/** Points where exactly one horizontal and one vertical wall run meet end to end. */
+/** Cache right-angle wall joins once per map. T and four-way intersections stay square. */
 export function wallCorners(segments: Segment[]): Corner[] {
-  const ends = new Map<string, { horizontal: boolean; at: Point; other: Point }[]>();
-  for (const g of segments) {
-    const horizontal = g.y1 === g.y2;
-    for (const [x, y, ox, oy] of [
-      [g.x1, g.y1, g.x2, g.y2],
-      [g.x2, g.y2, g.x1, g.y1],
-    ]) {
-      const k = cornerKey(x, y);
-      const list = ends.get(k) ?? [];
-      list.push({ horizontal, at: { x, y }, other: { x: ox, y: oy } });
-      ends.set(k, list);
+  const endpoints = new Map<string, { point: Point; other: Point; horizontal: boolean }[]>();
+  for (const segment of segments) {
+    const horizontal = segment.y1 === segment.y2;
+    for (const [point, other] of [
+      [{ x: segment.x1, y: segment.y1 }, { x: segment.x2, y: segment.y2 }],
+      [{ x: segment.x2, y: segment.y2 }, { x: segment.x1, y: segment.y1 }],
+    ] as [Point, Point][]) {
+      const key = cornerKey(point.x, point.y), list = endpoints.get(key) ?? [];
+      list.push({ point, other, horizontal }); endpoints.set(key, list);
     }
   }
-  const out: Corner[] = [];
-  for (const list of ends.values()) {
-    if (list.length !== 2) continue; // T and + junctions stay square
-    const h = list.find((e) => e.horizontal);
-    const v = list.find((e) => !e.horizontal);
-    if (h && v) out.push({ x: h.at.x, y: h.at.y, ends: [h.other, v.other] });
+  const corners: Corner[] = [];
+  for (const ends of endpoints.values()) {
+    if (ends.length !== 2 || ends[0].horizontal === ends[1].horizontal) continue;
+    corners.push({ x: ends[0].point.x, y: ends[0].point.y, ends: [ends[0].other, ends[1].other] });
   }
-  return out;
+  return corners;
 }
 
 const preCache = new WeakMap<DungeonMap, Pre>();
+
+/** Trace cell occupancy into smooth illustration paths. These paths affect
+ * only the artwork; movement and collision continue to use map cells. */
+function terrainContour(map: DungeonMap, include: (terrain: Terrain) => boolean, r: Region): Path2D {
+  type Edge = { x1: number; y1: number; x2: number; y2: number; used: boolean };
+  const edges: Edge[] = [];
+  const x0 = Math.max(0, r.x0 - 2), y0 = Math.max(0, r.y0 - 2), x1 = Math.min(map.width, r.x1 + 2), y1 = Math.min(map.height, r.y1 + 2);
+  const has = (x: number, y: number) => x >= x0 && y >= y0 && x < x1 && y < y1 && include(map.terrain[idx(map, x, y)]);
+  for (let y = y0; y < y1; y++) for (let x = x0; x < x1; x++) {
+    if (!has(x, y)) continue;
+    if (!has(x, y - 1)) edges.push({ x1: x, y1: y, x2: x + 1, y2: y, used: false });
+    if (!has(x + 1, y)) edges.push({ x1: x + 1, y1: y, x2: x + 1, y2: y + 1, used: false });
+    if (!has(x, y + 1)) edges.push({ x1: x + 1, y1: y + 1, x2: x, y2: y + 1, used: false });
+    if (!has(x - 1, y)) edges.push({ x1: x, y1: y + 1, x2: x, y2: y, used: false });
+  }
+  const key = (x: number, y: number) => `${x},${y}`;
+  const outgoing = new Map<string, Edge[]>();
+  for (const edge of edges) {
+    const k = key(edge.x1, edge.y1), list = outgoing.get(k) ?? [];
+    list.push(edge); outgoing.set(k, list);
+  }
+  const direction = (e: Edge) => e.x2 > e.x1 ? 0 : e.y2 > e.y1 ? 1 : e.x2 < e.x1 ? 2 : 3;
+  const contours: { x: number; y: number }[][] = [];
+  for (const start of edges) {
+    if (start.used) continue;
+    const points = [{ x: start.x1, y: start.y1 }];
+    let edge: Edge | undefined = start;
+    for (let guard = 0; edge && guard <= edges.length; guard++) {
+      edge.used = true;
+      points.push({ x: edge.x2, y: edge.y2 });
+      if (edge.x2 === start.x1 && edge.y2 === start.y1) break;
+      const choices = (outgoing.get(key(edge.x2, edge.y2)) ?? []).filter((candidate) => !candidate.used);
+      const dir = direction(edge);
+      const rank = (candidate: Edge) => {
+        const turn = (direction(candidate) - dir + 4) % 4;
+        return turn === 1 ? 0 : turn === 0 ? 1 : turn === 3 ? 2 : 3;
+      };
+      choices.sort((a, b) => rank(a) - rank(b));
+      edge = choices[0];
+    }
+    if (points.length >= 5 && points[0].x === points[points.length - 1].x && points[0].y === points[points.length - 1].y) contours.push(points.slice(0, -1));
+  }
+  const path = new Path2D();
+  const midpoint = (a: { x: number; y: number }, b: { x: number; y: number }) => ({ x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 });
+  for (const points of contours) {
+    const first = midpoint(points[points.length - 1], points[0]);
+    path.moveTo(first.x, first.y);
+    for (let i = 0; i < points.length; i++) {
+      const here = points[i], next = points[(i + 1) % points.length], end = midpoint(here, next);
+      path.quadraticCurveTo(here.x, here.y, end.x, end.y);
+    }
+    path.closePath();
+  }
+  return path;
+}
+
+function fillMapPath(ctx: Ctx, path: Path2D, c: number) {
+  ctx.save();
+  ctx.scale(c, c);
+  ctx.fill(path, 'evenodd');
+  ctx.restore();
+}
+
+function strokeMapPath(ctx: Ctx, path: Path2D, c: number) {
+  ctx.save();
+  ctx.scale(c, c);
+  ctx.stroke(path);
+  ctx.restore();
+}
+
+function naturalPath(map: DungeonMap, p: Pre, name: string, include: (terrain: Terrain) => boolean, r: Region): Path2D {
+  const key = `${name}:${r.x0},${r.y0},${r.x1},${r.y1}`;
+  let path = p.natural.get(key);
+  if (!path) { path = terrainContour(map, include, r); p.natural.set(key, path); }
+  return path;
+}
 
 /** Lines along the edge between two kinds of squares, merged into long runs. */
 function edgeSegments(map: DungeonMap, inside: (t: Terrain) => boolean, outside: (t: Terrain) => boolean): Segment[] {
@@ -164,17 +233,16 @@ function pre(map: DungeonMap): Pre {
   const doors = new Map<number, DoorState>();
   for (const o of map.objects) if (o.kind === 'door') doors.set(idx(map, o.at.x, o.at.y), o.state);
   const style = map.style ?? 'dungeon';
-  const ground = (t: Terrain) => t === 'ground' || t === 'brush' || t === 'tree';
   const segments = wallSegments(map);
-  // Rounded corners suit carved rock and plastered rooms; town walls and houses stay square.
   const corners = style === 'outdoor' ? [] : wallCorners(segments);
   p = {
     seed: hashString(`ink:${map.generation?.seed ?? map.id}`),
     style,
     segments,
     corners,
-    cornerKeys: new Set(corners.map((k) => cornerKey(k.x, k.y))),
-    roadEdges: style === 'outdoor' ? edgeSegments(map, (t) => t === 'road', ground) : [],
+    cornerKeys: new Set(corners.map((corner) => cornerKey(corner.x, corner.y))),
+    roadEdges: style === 'outdoor' ? edgeSegments(map, (t) => t === 'road', (t) => t === 'ground' || t === 'brush' || t === 'tree') : [],
+    natural: new Map(),
     rockDist: rockDistance(map, 3),
     doors,
     furnitureCells,
@@ -223,9 +291,15 @@ function forCells(map: DungeonMap, r: Region, margin: number, fn: (x: number, y:
   for (let y = y0; y < y1; y++) for (let x = x0; x < x1; x++) fn(x, y, idx(map, x, y));
 }
 
+function isUrban(map: DungeonMap): boolean {
+  const kind = map.generation?.params.kind;
+  return kind === 'town' || kind === 'city';
+}
+
 function drawPaper(ctx: Ctx, map: DungeonMap, p: Pre, c: number, r: Region) {
-  ctx.fillStyle = INK.paper;
+  ctx.fillStyle = p.style === 'outdoor' ? (isUrban(map) ? '#aaa28f' : '#718052') : INK.paper;
   ctx.fillRect(r.x0 * c, r.y0 * c, (r.x1 - r.x0) * c, (r.y1 - r.y0) * c);
+  if (p.style === 'outdoor') return;
   forCells(map, r, 0, (x, y) => {
     const rng = rngAt(p.seed, SALT.paper, x, y);
     for (let k = 0; k < 3; k++) {
@@ -238,6 +312,7 @@ function drawPaper(ctx: Ctx, map: DungeonMap, p: Pre, c: number, r: Region) {
 
 /** Crosshatch in the rock around walls (dungeons), on walls (interiors), and over whole buildings (outdoors). */
 function drawHatching(ctx: Ctx, map: DungeonMap, p: Pre, c: number, r: Region) {
+  if (p.style === 'outdoor') return;
   const keep = p.style === 'dungeon' ? [0, 1, 0.6, 0.18, 0] : p.style === 'interior' ? [0, 1, 0, 0, 0] : [0, 1, 1, 1, 1];
   ctx.strokeStyle = p.style === 'outdoor' ? 'rgba(42, 36, 31, 0.6)' : INK.hatch;
   ctx.lineWidth = Math.max(0.6, c * 0.035);
@@ -273,7 +348,7 @@ function drawHatching(ctx: Ctx, map: DungeonMap, p: Pre, c: number, r: Region) {
   });
 }
 
-function drawFloor(ctx: Ctx, map: DungeonMap, p: Pre, c: number, r: Region, grid: boolean) {
+function drawFloor(ctx: Ctx, map: DungeonMap, p: Pre, c: number, r: Region) {
   // Open squares in this region, as one path (rows of runs).
   const open = new Path2D();
   for (let y = Math.max(0, r.y0 - 1); y < Math.min(map.height, r.y1 + 1); y++) {
@@ -287,17 +362,10 @@ function drawFloor(ctx: Ctx, map: DungeonMap, p: Pre, c: number, r: Region, grid
       }
     }
   }
-  ctx.fillStyle = INK.floor;
+  ctx.fillStyle = p.style === 'outdoor' ? (isUrban(map) ? '#c0b59a' : '#85935e') : INK.floor;
   ctx.fill(open);
   ctx.save();
   ctx.clip(open);
-  // Roads are a shade darker than open ground.
-  if (p.style !== 'dungeon') {
-    ctx.fillStyle = INK.road;
-    forCells(map, r, 1, (x, y, i) => {
-      if (map.terrain[i] === 'road') ctx.fillRect(x * c, y * c, c, c);
-    });
-  }
   // Soft shadow inside every wall.
   ctx.fillStyle = INK.shadow;
   const s = c * 0.16;
@@ -311,23 +379,42 @@ function drawFloor(ctx: Ctx, map: DungeonMap, p: Pre, c: number, r: Region, grid
       ctx.fillRect(right ? g.x1 * c : g.x1 * c - s, g.y1 * c, s, (g.y2 - g.y1) * c);
     }
   }
-  if (grid) {
-    ctx.strokeStyle = INK.grid;
-    ctx.lineWidth = Math.max(0.5, c * 0.025);
-    ctx.setLineDash([c * 0.12, c * 0.1]);
-    ctx.beginPath();
-    for (let x = r.x0; x <= r.x1; x++) {
-      ctx.moveTo(x * c, r.y0 * c);
-      ctx.lineTo(x * c, r.y1 * c);
-    }
-    for (let y = r.y0; y <= r.y1; y++) {
-      ctx.moveTo(r.x0 * c, y * c);
-      ctx.lineTo(r.x1 * c, y * c);
-    }
-    ctx.stroke();
-    ctx.setLineDash([]);
-  }
   ctx.restore();
+}
+
+function drawNaturalSurfaces(ctx: Ctx, map: DungeonMap, p: Pre, c: number, r: Region) {
+  if (p.style === 'outdoor') {
+    const water = naturalPath(map, p, 'water', (t) => t === 'water', r);
+    const deepwater = naturalPath(map, p, 'deepwater', (t) => t === 'deepwater', r);
+    const road = naturalPath(map, p, 'road', (t) => t === 'road', r);
+    ctx.fillStyle = '#275c64'; fillMapPath(ctx, deepwater, c);
+    ctx.fillStyle = '#3b7477'; fillMapPath(ctx, water, c);
+    ctx.fillStyle = isUrban(map) ? '#776d5d' : '#796c4d'; fillMapPath(ctx, road, c);
+    ctx.lineWidth = 0.035;
+    ctx.strokeStyle = 'rgba(35, 48, 39, 0.42)';
+    strokeMapPath(ctx, road, c);
+    ctx.strokeStyle = 'rgba(24, 58, 67, 0.38)';
+    strokeMapPath(ctx, water, c);
+    strokeMapPath(ctx, deepwater, c);
+  }
+}
+
+function drawTacticalGrid(ctx: Ctx, map: DungeonMap, c: number, r: Region, p: Pre) {
+  const open = new Path2D();
+  forCells(map, r, 0, (x, y, i) => {
+    const terrain = map.terrain[i];
+    const outdoorOpen = p.style === 'outdoor' && terrain !== 'tree' && terrain !== 'obstacle' && !p.structureCells.has(i);
+    if (isOpenAt(map, x, y) && (p.style !== 'outdoor' || outdoorOpen)) open.rect(x * c, y * c, c, c);
+  });
+  ctx.save(); ctx.clip(open);
+  ctx.strokeStyle = p.style === 'outdoor' ? 'rgba(31, 38, 31, 0.28)' : INK.grid;
+  ctx.lineWidth = Math.max(0.45, c * 0.022);
+  ctx.setLineDash(p.style === 'outdoor' ? [] : [c * 0.16, c * 0.11]);
+  ctx.beginPath();
+  for (let x = r.x0; x <= r.x1; x++) { ctx.moveTo(x * c, r.y0 * c); ctx.lineTo(x * c, r.y1 * c); }
+  for (let y = r.y0; y <= r.y1; y++) { ctx.moveTo(r.x0 * c, y * c); ctx.lineTo(r.x1 * c, y * c); }
+  ctx.stroke();
+  ctx.setLineDash([]); ctx.restore();
 }
 
 function drawWalls(ctx: Ctx, p: Pre, c: number, r: Region) {
@@ -346,20 +433,19 @@ function drawWalls(ctx: Ctx, p: Pre, c: number, r: Region) {
       if (!segIn(g, r)) continue;
       const rng = segRng(p, g);
       if (pass === 1) for (let k = 0; k < 64; k++) rng(); // a different wobble for the second pass
-      // Stop short of rounded corners (0.2 of a square); the curve joins them.
-      const TRIM = 0.2;
+      const trim = c * 0.2;
+      const atCorner = (x: number, y: number) => p.cornerKeys.has(cornerKey(x, y));
       const horizontal = g.y1 === g.y2;
-      const t1 = p.cornerKeys.has(cornerKey(g.x1, g.y1)) ? TRIM : 0;
-      const t2 = p.cornerKeys.has(cornerKey(g.x2, g.y2)) ? TRIM : 0;
-      const x1 = g.x1 + (horizontal ? t1 : 0),
-        x2 = g.x2 - (horizontal ? t2 : 0),
-        y1 = g.y1 + (horizontal ? 0 : t1),
-        y2 = g.y2 - (horizontal ? 0 : t2);
+      const x1 = g.x1 + (atCorner(g.x1, g.y1) ? trim / c : 0) * (horizontal ? 1 : 0);
+      const x2 = g.x2 - (atCorner(g.x2, g.y2) ? trim / c : 0) * (horizontal ? 1 : 0);
+      const y1 = g.y1 + (atCorner(g.x1, g.y1) ? trim / c : 0) * (horizontal ? 0 : 1);
+      const y2 = g.y2 - (atCorner(g.x2, g.y2) ? trim / c : 0) * (horizontal ? 0 : 1);
       penLine(ctx, rng, x1 * c, y1 * c, x2 * c, y2 * c, c * 0.025);
     }
     for (const corner of p.corners) {
       if (corner.x < r.x0 - 1 || corner.x > r.x1 + 1 || corner.y < r.y0 - 1 || corner.y > r.y1 + 1) continue;
       const ends = corner.ends;
+      if (ends.length !== 2) continue;
       ctx.moveTo((corner.x + (ends[0].x - corner.x) * 0.2) * c, (corner.y + (ends[0].y - corner.y) * 0.2) * c);
       ctx.quadraticCurveTo(corner.x * c, corner.y * c, (corner.x + (ends[1].x - corner.x) * 0.2) * c, (corner.y + (ends[1].y - corner.y) * 0.2) * c);
     }
@@ -453,9 +539,7 @@ function drawRoadPebbles(ctx: Ctx, x: number, y: number, c: number, rng: R) {
 }
 
 function drawWater(ctx: Ctx, x: number, y: number, deep: boolean, c: number, rng: R) {
-  ctx.fillStyle = deep ? 'rgba(42, 36, 31, 0.2)' : 'rgba(42, 36, 31, 0.07)';
-  ctx.fillRect(x * c, y * c, c, c);
-  ctx.strokeStyle = deep ? 'rgba(42, 36, 31, 0.75)' : 'rgba(42, 36, 31, 0.55)';
+  ctx.strokeStyle = deep ? 'rgba(18, 47, 58, 0.58)' : 'rgba(24, 65, 70, 0.45)';
   ctx.lineWidth = Math.max(0.6, c * 0.035);
   ctx.beginPath();
   const lines = deep ? 3 : 2;
@@ -468,10 +552,19 @@ function drawWater(ctx: Ctx, x: number, y: number, deep: boolean, c: number, rng
     ctx.quadraticCurveTo(x0 + w * 0.875, yy - c * 0.04, x0 + w, yy);
   }
   ctx.stroke();
+  if (!deep) {
+    // Shallow water gets a stipple in addition to its two ripple lines, so it
+    // remains distinct from deep water and ground without relying on hue.
+    ctx.fillStyle = 'rgba(232, 235, 210, 0.62)';
+    for (let k = 0; k < 4; k++) {
+      const px = (x + 0.14 + rng() * 0.72) * c, py = (y + 0.12 + rng() * 0.76) * c;
+      ctx.beginPath(); ctx.arc(px, py, Math.max(0.45, c * 0.018), 0, Math.PI * 2); ctx.fill();
+    }
+  }
 }
 
 /** A tree from above: a lobed canopy with a soft shadow. */
-function drawTree(ctx: Ctx, x: number, y: number, c: number, rng: R) {
+function drawTree(ctx: Ctx, x: number, y: number, c: number, rng: R, outdoor = false) {
   const cx = (x + 0.5 + (rng() - 0.5) * 0.25) * c,
     cy = (y + 0.5 + (rng() - 0.5) * 0.25) * c;
   const rad = c * (0.55 + rng() * 0.12);
@@ -496,7 +589,7 @@ function drawTree(ctx: Ctx, x: number, y: number, c: number, rng: R) {
   ctx.fill();
   ctx.restore();
   canopy();
-  ctx.fillStyle = INK.floor;
+  ctx.fillStyle = outdoor ? (rng() > 0.5 ? '#526b43' : '#60774a') : INK.floor;
   ctx.fill();
   ctx.strokeStyle = INK.ink;
   ctx.lineWidth = Math.max(0.8, c * 0.05);
@@ -930,12 +1023,12 @@ const ROOF = '#e4d8bb';
 const STONE = '#cbbd9c';
 
 /** A hip roof seen from above: ridge along the long side, hips to the corners, shading on two slopes. */
-function drawRoof(ctx: Ctx, rect: { x: number; y: number; w: number; h: number }, c: number) {
+function drawRoof(ctx: Ctx, rect: { x: number; y: number; w: number; h: number }, c: number, outdoor = false) {
   const x0 = rect.x * c,
     y0 = rect.y * c,
     w = rect.w * c,
     h = rect.h * c;
-  ctx.fillStyle = ROOF;
+  ctx.fillStyle = outdoor ? '#8a6044' : ROOF;
   ctx.fillRect(x0, y0, w, h);
   const horizontal = w >= h;
   const half = (horizontal ? h : w) / 2;
@@ -1067,7 +1160,7 @@ function drawTower(ctx: Ctx, st: StructureObject, c: number) {
 
 function drawStructures(ctx: Ctx, map: DungeonMap, p: Pre, c: number, r: Region) {
   const near = (st: StructureObject) => st.rect.x < r.x1 + 1 && st.rect.x + st.rect.w > r.x0 - 1 && st.rect.y < r.y1 + 1 && st.rect.y + st.rect.h > r.y0 - 1;
-  for (const st of p.structures) if (st.type === 'building' && near(st)) drawRoof(ctx, st.rect, c);
+  for (const st of p.structures) if (st.type === 'building' && near(st)) drawRoof(ctx, st.rect, c, p.style === 'outdoor');
   for (const st of p.structures) if (st.type === 'wall' && near(st)) drawWallStones(ctx, map, st, c, r);
 }
 
@@ -1082,7 +1175,7 @@ function drawFeatures(ctx: Ctx, map: DungeonMap, p: Pre, c: number, r: Region) {
     const t = map.terrain[i];
     if (t === 'water' || t === 'deepwater') drawWater(ctx, x, y, t === 'deepwater', c, rngAt(p.seed, SALT.water, x, y));
     else if (t === 'brush') drawBrush(ctx, x, y, c, rngAt(p.seed, SALT.brush, x, y));
-    else if (t === 'ground' && p.style !== 'dungeon') drawGrass(ctx, x, y, c, rngAt(p.seed, SALT.grass, x, y));
+    else if (t === 'ground' && p.style !== 'dungeon' && !(p.style === 'outdoor' && isUrban(map))) drawGrass(ctx, x, y, c, rngAt(p.seed, SALT.grass, x, y));
     else if (t === 'road') drawRoadPebbles(ctx, x, y, c, rngAt(p.seed, SALT.road, x, y));
     if (isDifficult(map, x, y) && !p.furnitureCells.has(i) && (t === 'floor' || t === 'ground' || t === 'road'))
       drawRubble(ctx, x, y, c, rngAt(p.seed, SALT.rubble, x, y));
@@ -1114,7 +1207,7 @@ function drawFeatures(ctx: Ctx, map: DungeonMap, p: Pre, c: number, r: Region) {
 
 function drawTrees(ctx: Ctx, map: DungeonMap, p: Pre, c: number, r: Region) {
   forCells(map, r, 1, (x, y, i) => {
-    if (map.terrain[i] === 'tree') drawTree(ctx, x, y, c, rngAt(p.seed, SALT.tree, x, y));
+    if (map.terrain[i] === 'tree') drawTree(ctx, x, y, c, rngAt(p.seed, SALT.tree, x, y), p.style === 'outdoor');
   });
 }
 
@@ -1154,13 +1247,18 @@ export function drawInkRegion(ctx: Ctx, map: DungeonMap, opts: InkOptions, r: Re
   ctx.clip();
   drawPaper(ctx, map, p, c, r);
   drawHatching(ctx, map, p, c, r);
-  drawFloor(ctx, map, p, c, r, opts.grid);
-  drawRoadEdges(ctx, p, c, r);
+  drawFloor(ctx, map, p, c, r);
+  drawNaturalSurfaces(ctx, map, p, c, r);
+  // Outdoors place the optional tactical grid over walkable open terrain but
+  // below roofs, trees and objects so those remain legible.
+  if (opts.grid && p.style === 'outdoor') drawTacticalGrid(ctx, map, c, r, p);
+  if (p.style !== 'outdoor') drawRoadEdges(ctx, p, c, r);
   drawStructures(ctx, map, p, c, r);
   drawFeatures(ctx, map, p, c, r);
   drawWalls(ctx, p, c, r);
   drawTowers(ctx, p, c, r);
   drawTrees(ctx, map, p, c, r);
+  if (opts.grid && p.style !== 'outdoor') drawTacticalGrid(ctx, map, c, r, p);
   if (opts.roomNumbers) drawRoomNumbers(ctx, map, p, c, r);
   ctx.restore();
 }
