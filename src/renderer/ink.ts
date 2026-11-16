@@ -301,11 +301,39 @@ function drawWalls(ctx: Ctx, p: Pre, c: number, r: Region) {
     ctx.globalAlpha = alpha;
     ctx.lineWidth = Math.max(1, c * width);
     ctx.beginPath();
+    const endpointMap = new Map<string, { x: number; y: number; horizontal: boolean; other: { x: number; y: number } }[]>();
+    const key = (x: number, y: number) => `${x},${y}`;
+    for (const g of p.segments) {
+      const horizontal = g.y1 === g.y2;
+      for (const [x, y, ox, oy] of [[g.x1, g.y1, g.x2, g.y2], [g.x2, g.y2, g.x1, g.y1]]) {
+        const k = key(x, y), items = endpointMap.get(k) ?? [];
+        items.push({ x, y, horizontal, other: { x: ox, y: oy } }); endpointMap.set(k, items);
+      }
+    }
+    const corners = [...endpointMap.values()].flatMap((ends) => {
+      const h = ends.find((e) => e.horizontal), v = ends.find((e) => !e.horizontal);
+      return h && v ? [{ x: h.x, y: h.y, ends: [h.other, v.other] }] : [];
+    });
+    const cornerEnds = new Set(corners.map((corner) => key(corner.x, corner.y)));
     for (const g of p.segments) {
       if (!segIn(g, r)) continue;
       const rng = segRng(p, g);
       if (pass === 1) for (let k = 0; k < 64; k++) rng(); // a different wobble for the second pass
-      penLine(ctx, rng, g.x1 * c, g.y1 * c, g.x2 * c, g.y2 * c, c * 0.05);
+      const trim = c * 0.2;
+      const atCorner = (x: number, y: number) => cornerEnds.has(key(x, y));
+      const horizontal = g.y1 === g.y2;
+      const x1 = g.x1 + (atCorner(g.x1, g.y1) ? trim / c : 0) * (horizontal ? 1 : 0);
+      const x2 = g.x2 - (atCorner(g.x2, g.y2) ? trim / c : 0) * (horizontal ? 1 : 0);
+      const y1 = g.y1 + (atCorner(g.x1, g.y1) ? trim / c : 0) * (horizontal ? 0 : 1);
+      const y2 = g.y2 - (atCorner(g.x2, g.y2) ? trim / c : 0) * (horizontal ? 0 : 1);
+      penLine(ctx, rng, x1 * c, y1 * c, x2 * c, y2 * c, c * 0.025);
+    }
+    for (const corner of corners) {
+      if (corner.x < r.x0 - 1 || corner.x > r.x1 + 1 || corner.y < r.y0 - 1 || corner.y > r.y1 + 1) continue;
+      const ends = corner.ends;
+      if (ends.length !== 2) continue;
+      ctx.moveTo((corner.x + (ends[0].x - corner.x) * 0.2) * c, (corner.y + (ends[0].y - corner.y) * 0.2) * c);
+      ctx.quadraticCurveTo(corner.x * c, corner.y * c, (corner.x + (ends[1].x - corner.x) * 0.2) * c, (corner.y + (ends[1].y - corner.y) * 0.2) * c);
     }
     ctx.stroke();
   }
@@ -880,7 +908,19 @@ function drawRoof(ctx: Ctx, rect: { x: number; y: number; w: number; h: number }
     w = rect.w * c,
     h = rect.h * c;
   ctx.fillStyle = ROOF;
-  ctx.fillRect(x0, y0, w, h);
+  const radius = Math.min(c * 0.55, w * 0.16, h * 0.16);
+  ctx.beginPath();
+  ctx.moveTo(x0 + radius, y0);
+  ctx.lineTo(x0 + w - radius, y0);
+  ctx.quadraticCurveTo(x0 + w, y0, x0 + w, y0 + radius);
+  ctx.lineTo(x0 + w, y0 + h - radius);
+  ctx.quadraticCurveTo(x0 + w, y0 + h, x0 + w - radius, y0 + h);
+  ctx.lineTo(x0 + radius, y0 + h);
+  ctx.quadraticCurveTo(x0, y0 + h, x0, y0 + h - radius);
+  ctx.lineTo(x0, y0 + radius);
+  ctx.quadraticCurveTo(x0, y0, x0 + radius, y0);
+  ctx.closePath();
+  ctx.fill();
   const horizontal = w >= h;
   const half = (horizontal ? h : w) / 2;
   // Ridge end points
