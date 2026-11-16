@@ -82,7 +82,8 @@ A browser-based 2D dungeon authoring and encounter tool for D&D (2024 rules). Ge
 - Tables are 2×2 with chairs grouped around them, facing in, and aisles between groups. Rooms also get benches (temple pews, barracks), cabinets and rugs. Chairs and benches are difficult terrain, cabinets block movement, and rugs are just decoration.
 - Every doorway keeps a clear approach square inside it.
 - Taverns and inns: the common room opens onto a rear hall, and every other room has its own door off it. Inns have rooms on both sides of the hall (a passage from the common room runs between the front rooms), so they get five or more guest rooms.
-- The same seed now makes a different tavern or manor than in earlier versions. Saved campaigns are unaffected, because saves keep the whole map.
+- Dungeons (generator version 3) have more loops and more varied room shapes. Caves have wider, uneven passages. Walls in dungeons, caves and interiors are drawn with rounded corners; town walls and houses stay square.
+- The same seed now makes a different dungeon, cave, tavern or manor than in earlier versions. Saved campaigns are unaffected, because saves keep the whole map.
 
 Next: NPC routines and the world clock, editor tools and undo (M2b), and importing monster stats into the private library.
 

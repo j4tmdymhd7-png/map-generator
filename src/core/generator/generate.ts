@@ -574,12 +574,22 @@ export function generateDungeon(seed: string, overrides: Partial<GeneratorParams
       // Natural passages breathe wider than a one-cell line. Occasional
       // shoulders make traversable pockets while keeping the movement grid.
       if (p.theme === 'cave') {
-        const x = i % map.width, y = (i - x) / map.width;
-        for (const d of EIGHT_WAY) {
-          const nx = x + d.x, ny = y + d.y;
+        const x = i % map.width,
+          y = (i - x) / map.width;
+        // Sides first, then corners: a corner square is only carved when one of
+        // the two squares beside it is open, so it never touches the passage by
+        // a corner alone (you can't step diagonally past a corner).
+        const open = (ax: number, ay: number) => carved.has(idx(map, ax, ay)) || map.terrain[idx(map, ax, ay)] !== 'void';
+        for (const d of [...ORTHOGONAL, ...EIGHT_WAY.filter((e) => e.x && e.y)]) {
+          const nx = x + d.x,
+            ny = y + d.y;
           if (nx < 1 || ny < 1 || nx >= map.width - 1 || ny >= map.height - 1) continue;
           const ni = idx(map, nx, ny);
-          if (roomAt[ni] < 0 && map.terrain[ni] === 'void' && rng.chance(d.x && d.y ? 0.32 : 0.18)) carved.add(ni);
+          if (roomAt[ni] >= 0 || map.terrain[ni] !== 'void') continue;
+          const diagonal = d.x !== 0 && d.y !== 0;
+          if (!rng.chance(diagonal ? 0.32 : 0.18)) continue;
+          if (diagonal && !open(nx, y) && !open(x, ny)) continue;
+          carved.add(ni);
         }
       }
     }
